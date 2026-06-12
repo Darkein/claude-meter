@@ -127,6 +127,10 @@ static lv_obj_t *battery_img;
 static lv_obj_t *logo_img;
 static lv_image_dsc_t battery_dscs[5]; // empty, low, medium, full, charging
 
+// ---- Volume indicator (shared, on top, left of battery) ----
+static lv_obj_t *volume_img;
+static lv_image_dsc_t volume_dscs[4]; // off, low, med, high
+
 // ---- Live-data freshness → which usage sub-view to show ----
 // usage panels when data is flowing, an idle "Zzz" screen when the host is
 // connected but no usage update landed within DATA_FRESH_MS, the pairing hint
@@ -378,6 +382,14 @@ static void init_battery_icons(void)
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
+static void init_volume_icons(void)
+{
+    init_icon_dsc_rgb565a8(&volume_dscs[0], ICON_VOL_OFF_W, ICON_VOL_OFF_H, icon_volume_off_data);
+    init_icon_dsc_rgb565a8(&volume_dscs[1], ICON_VOL_LOW_W, ICON_VOL_LOW_H, icon_volume_low_data);
+    init_icon_dsc_rgb565a8(&volume_dscs[2], ICON_VOL_MED_W, ICON_VOL_MED_H, icon_volume_med_data);
+    init_icon_dsc_rgb565a8(&volume_dscs[3], ICON_VOL_HIGH_W, ICON_VOL_HIGH_H, icon_volume_high_data);
+}
+
 // ======== Usage Screen ========
 
 static void make_usage_panel(lv_obj_t *parent, int y, const char *pill_text,
@@ -476,7 +488,7 @@ static void init_usage_screen(lv_obj_t *scr)
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -530,7 +542,10 @@ static void init_approval_screen(lv_obj_t *scr)
     lv_label_set_text(lbl_approval_count, "Permission");
     lv_obj_set_style_text_font(lbl_approval_count, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_approval_count, COL_DIM, 0);
-    lv_obj_align(lbl_approval_count, LV_ALIGN_TOP_MID, 0, L.title_y);
+    // Center the header text against the 48px top-bar icons (battery/volume),
+    // whose vertical center sits at title_y + 24. A ~24px font centered there
+    // needs its top at title_y + 12.
+    lv_obj_align(lbl_approval_count, LV_ALIGN_TOP_MID, 0, L.title_y + 12);
 
     // Tool name, large and centered.
     lbl_approval_tool = lv_label_create(approval_container);
@@ -560,12 +575,26 @@ static void approval_refresh_labels(void)
 {
     if (!lbl_approval_tool)
         return;
-    lv_label_set_text(lbl_approval_tool, s_pending_tool[0] ? s_pending_tool : "Tool");
+
+    // The daemon sends the raw tool_name (e.g. "Bash", "Write", or
+    // "AskUserQuestion"). AskUserQuestion isn't a permission prompt — it's
+    // Claude asking the user a question — so show natural wording for it and
+    // keep the real tool name otherwise.
+    bool is_question = (strcmp(s_pending_tool, "AskUserQuestion") == 0);
+    const char *title = is_question ? "Claude is asking"
+                                    : (s_pending_tool[0] ? s_pending_tool : "Tool");
+    lv_label_set_text(lbl_approval_tool, title);
     lv_label_set_text(lbl_approval_detail, s_pending_detail);
+
+    // Center the title on the Y axis when there's no detail line under it
+    // (typical for a question); nudge it up to make room when a detail shows.
+    lv_obj_align(lbl_approval_tool, LV_ALIGN_CENTER, 0,
+                 s_pending_detail[0] ? -30 : 0);
+
     if (s_approval_count > 1)
         lv_label_set_text_fmt(lbl_approval_count, "Permission  1 / %d", s_approval_count);
     else
-        lv_label_set_text(lbl_approval_count, "Permission");
+        lv_label_set_text(lbl_approval_count, is_question ? "Question" : "Permission");
 }
 
 // ======== Public API ========
@@ -580,6 +609,7 @@ void ui_init(void)
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
+    init_volume_icons();
 
     init_usage_screen(scr);
     init_approval_screen(scr);
@@ -591,6 +621,11 @@ void ui_init(void)
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
+
+    // Volume icon sits just left of the battery (48px wide + 12px gap).
+    volume_img = lv_image_create(scr);
+    lv_image_set_src(volume_img, &volume_dscs[2]);  // med default; volume_init() sets the real level
+    lv_obj_set_pos(volume_img, L.scr_w - 48 - L.margin - 48 - 12, L.title_y);
 }
 
 // React to a change in the cached Claude-state / approval-queue: refresh the
@@ -862,4 +897,11 @@ void ui_update_battery(int percent, bool charging)
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_update_volume(uint8_t idx)
+{
+    if (!volume_img || idx > 3)
+        return;
+    lv_image_set_src(volume_img, &volume_dscs[idx]);
 }

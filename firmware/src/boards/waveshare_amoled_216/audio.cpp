@@ -5,3 +5,5 @@
 void audio_hal_init(void) {}
 void audio_hal_tick(void) {}
 void audio_hal_play(audio_sound_t) {}
+void audio_hal_set_volume(uint8_t) {}
+uint8_t audio_hal_get_volume(void) { return 0; }

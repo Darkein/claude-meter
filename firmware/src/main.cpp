@@ -10,6 +10,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "volume.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -227,6 +228,7 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
+    volume_init();   // load saved volume, apply to audio HAL, set the top-bar icon
     ui_show_screen(SCREEN_USAGE);
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
@@ -295,48 +297,33 @@ void loop() {
     if (!idle_is_asleep()) display_hal_tick();
 
     // ---- Physical buttons ----
-    //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
-    //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → cycle brightness; hold ~3s + release: pairing mode
+    //   PRIMARY (BOOT)   → cycle brightness
+    //   SECONDARY (KEY)  → cycle chime volume (only if the board has one)
+    //   PWR              → hold ~3s + release: pairing mode (no short-press action)
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
     // press. Activity bookkeeping happens inside idle_consume_wake_press
-    // so no separate idle_note_activity() call is needed here.
+    // so no separate idle_note_activity() call is needed here. Brightness and
+    // volume are taps (fire on the press edge only — no release handling).
     {
         static bool primary_was = false;
-        static bool primary_wake_swallowed = false;
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
         if (primary_now != primary_was) {
-            if (primary_now) {
-                if (idle_consume_wake_press()) primary_wake_swallowed = true;
-                else                            ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            } else {
-                if (primary_wake_swallowed) primary_wake_swallowed = false;
-                else                        ble_keyboard_release();
-            }
+            if (primary_now && !idle_consume_wake_press()) brightness_cycle();
             primary_was = primary_now;
         }
 
         if (board_caps().button_count >= 2) {
             static bool secondary_was = false;
-            static bool secondary_wake_swallowed = false;
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
             if (secondary_now != secondary_was) {
-                if (secondary_now) {
-                    if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else                            ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-                } else {
-                    if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
-                }
+                if (secondary_now && !idle_consume_wake_press()) volume_cycle();
                 secondary_was = secondary_now;
             }
         }
 
         if (power_hal_pwr_pressed()) {
-            if (!idle_consume_wake_press()) {
-                brightness_cycle();   // single usage view — PWR cycles brightness
-            }
+            (void)idle_consume_wake_press();  // PWR only wakes; pairing is the hold gesture
         }
 
         pair_tick();

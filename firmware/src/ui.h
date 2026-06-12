@@ -15,3 +15,4 @@ void ui_show_screen(screen_t screen);
 screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
+void ui_update_volume(uint8_t idx);  // 0=off,1=low,2=med,3=high
