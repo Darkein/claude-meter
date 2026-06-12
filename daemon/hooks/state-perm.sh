@@ -20,6 +20,13 @@ SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 1
 TOOL=$(printf '%s' "$IN" | jq -r '.tool_name // ""')
 
+# AskUserQuestion raises a permission dialog too, but it is a "pick an answer"
+# prompt, not an allow/deny — the PreToolUse:AskUserQuestion hook already set
+# "asking" (cs=4). Don't clobber it with "waiting" (cs=2) here, or the device
+# shows an Allow/Deny screen for a tool that has neither. Let asking stand;
+# exit non-blocking like every other path in this hook.
+[ "$TOOL" = "AskUserQuestion" ] && exit 1
+
 # A short human detail to show under the tool name (mirrors what Claude Code's
 # own prompt highlights): the command for Bash, the path for file tools, the
 # URL for fetches, else the first scalar value in tool_input. Truncated so it

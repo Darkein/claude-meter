@@ -13,15 +13,25 @@
 # Claude Code prompt stays the sole approver; the device only mirrors state.
 #
 # Session-state event map (no blind spots):
-#   working  <- UserPromptSubmit, PostToolUse, PostToolUseFailure, ElicitationResult
+#   working  <- UserPromptSubmit, PreToolUse:* (except AskUserQuestion),
+#               PostToolUse, PostToolUseFailure, ElicitationResult
 #   asking   <- PreToolUse:AskUserQuestion, Notification:elicitation_dialog
-#   waiting  <- PermissionRequest (every tool-permission dialog; state-perm.sh)
+#   waiting  <- PermissionRequest (every tool-permission dialog EXCEPT
+#               AskUserQuestion, which state-perm.sh skips; state-perm.sh)
 #   idle     <- Stop, StopFailure, Notification:idle_prompt
 #   (remove) <- SessionEnd
 #
-# "asking" and "waiting" both clear automatically: once the user answers, the
-# agentic loop resumes and the next PostToolUse fires "working", overwriting it
-# (on a denied permission, no tool runs and Stop -> idle clears it instead).
+# "waiting" clears the moment the permission is answered: a granted prompt fires
+# PreToolUse (before the tool executes) -> "working", so the device's approval
+# screen disappears at decision time rather than after the (possibly slow) tool
+# finishes. A denied permission runs no tool; Stop -> idle clears it instead.
+# "asking" clears when the user answers and the loop's next PreToolUse/PostToolUse
+# fires "working".
+#
+# DIALOG CANCEL (ESC): pressing ESC to dismiss a permission OR AskUserQuestion
+# dialog fires NO hook (only mid-generation ESC emits Stop), so neither "waiting"
+# nor "asking" gets an event to clear it. The daemon's DIALOG_STALE_S (~3min)
+# timeout is what clears a dismissed dialog — there is no hook-based path.
 #
 # PermissionRequest is used for permission dialogs instead of
 # Notification:permission_prompt because the Notification only fires when the OS
@@ -39,7 +49,7 @@ command -v jq >/dev/null || { echo "Error: jq is required to merge settings.json
 
 echo "  Copying hook scripts -> $HOOK_DST"
 mkdir -p "$HOOK_DST"
-cp "$HOOK_SRC"/state-set.sh "$HOOK_SRC"/state-perm.sh "$HOOK_SRC"/state-end.sh "$HOOK_DST/"
+cp "$HOOK_SRC"/state-set.sh "$HOOK_SRC"/state-perm.sh "$HOOK_SRC"/state-pretool.sh "$HOOK_SRC"/state-end.sh "$HOOK_DST/"
 chmod +x "$HOOK_DST"/*.sh
 # Drop scripts from the previous install layout so they can't linger on disk.
 rm -f "$HOOK_DST"/state-working.sh "$HOOK_DST"/state-idle.sh "$HOOK_DST"/state-approve.sh \
@@ -49,6 +59,7 @@ WORK="$HOOK_DST/state-set.sh working"
 IDLE="$HOOK_DST/state-set.sh idle"
 ASK="$HOOK_DST/state-set.sh asking"
 PERM="$HOOK_DST/state-perm.sh"
+PRETOOL="$HOOK_DST/state-pretool.sh"
 END="$HOOK_DST/state-end.sh"
 
 mkdir -p "$(dirname "$SETTINGS")"
@@ -60,13 +71,15 @@ echo "  Backed up settings.json -> $SETTINGS.clawdmeter.bak"
 # script paths) from a group, leaving third-party hooks (e.g. sound) untouched,
 # then we re-add our entries. clean() drops a now-empty event group entirely.
 jq \
-  --arg work "$WORK" --arg idle "$IDLE" --arg ask "$ASK" --arg perm "$PERM" --arg end "$END" \
+  --arg work "$WORK" --arg idle "$IDLE" --arg ask "$ASK" --arg perm "$PERM" \
+  --arg pretool "$PRETOOL" --arg end "$END" \
   --arg legacy_dir "$HOOK_DST" \
   '
   # true if a hook command is one of ours (current args or any legacy script)
   def is_ours($cmd):
-    ($cmd == $work) or ($cmd == $idle) or ($cmd == $ask) or ($cmd == $perm) or ($cmd == $end)
-    or ($cmd | test("/state-(working|idle|approve|set|waiting|perm|end)\\.sh"));
+    ($cmd == $work) or ($cmd == $idle) or ($cmd == $ask) or ($cmd == $perm)
+    or ($cmd == $pretool) or ($cmd == $end)
+    or ($cmd | test("/state-(working|idle|approve|set|waiting|perm|pretool|end)\\.sh"));
 
   def strip:
     map(.hooks |= map(select(is_ours(.command) | not)))
@@ -75,11 +88,15 @@ jq \
   def clean($k):
     if (.hooks[$k] | length // 0) == 0 then del(.hooks[$k]) else . end;
 
-  # PreToolUse: NO approval gate (display-only). Strip any prior entry, then add
-  # one matcher for AskUserQuestion -> "asking" (the only hook that fires when the
-  # built-in question tool blocks for a user choice; no Notification is emitted).
+  # PreToolUse: NO approval gate (display-only). Strip any prior entry, then add:
+  #   - AskUserQuestion -> "asking" (built-in question tool blocking for a choice)
+  #   - *              -> "working" (fires right after a permission is granted,
+  #                        before the tool runs; clears the device "waiting" screen
+  #                        at decision time. state-pretool.sh skips AskUserQuestion
+  #                        so it does not clobber the "asking" matcher above.)
   .hooks.PreToolUse = ((.hooks.PreToolUse // []) | strip)
     + [ {matcher:"AskUserQuestion", hooks:[ {type:"command", command:$ask} ]} ]
+    + [ {matcher:"*",               hooks:[ {type:"command", command:$pretool} ]} ]
 
   # PermissionRequest fires for EVERY tool permission dialog, focused or not
   # (Notification:permission_prompt only fires when the OS emits a notification,

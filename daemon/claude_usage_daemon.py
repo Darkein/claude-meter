@@ -34,8 +34,18 @@ SCAN_TIMEOUT = 8.0
 # Live Claude Code state: hooks write per-session files here; the daemon watches
 # the dir and translates them into the BLE payload. See daemon/hooks/.
 STATE_DIR = Path.home() / ".config" / "claude-usage-monitor" / "state"
-STATE_STALE_S = 30        # a working/idle file older than this is ignored (crashed session)
-WAITING_MAX_AGE_S = 86400  # prune a waiting file this old (abandoned permission prompt)
+STATE_STALE_S = 120       # a working/idle file older than this is ignored (crashed session).
+                          # Sized to outlast a long-running tool: no hook fires between a
+                          # tool's PreToolUse (working) and PostToolUse (working at the end),
+                          # so a shorter window would falsely flip the device to idle mid-run.
+WAITING_MAX_AGE_S = 86400  # hard prune: delete a waiting/asking file this old (truly abandoned)
+DIALOG_STALE_S = 180      # ignore a waiting/asking file older than this. Pressing ESC to dismiss
+                          # a permission OR AskUserQuestion dialog fires NO hook (confirmed: only
+                          # mid-generation ESC emits Stop), so a cancelled dialog's state file is
+                          # never cleared by an event. This timeout is the only thing that clears
+                          # it. A human leaving a real prompt unanswered >3min is rare; the cost of
+                          # being wrong (device under-shows a slow human) is far below the old bug
+                          # (device stuck "permission pending" for 24h after every ESC).
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -371,17 +381,20 @@ def _claude_state_fields() -> dict:
         sid = d.get("sid") or f.stem
         if st == "waiting":
             if now - ts > WAITING_MAX_AGE_S:
-                # Abandoned past the hook's own timeout — prune it.
                 f.unlink(missing_ok=True)
+                continue
+            if now - ts > DIALOG_STALE_S:
+                # Likely an ESC-dismissed dialog (no hook clears it) — ignore so
+                # the device falls back to the activity state. Keep the file for
+                # the hard-prune above in case it IS still pending.
                 continue
             waiting.append((ts, sid, str(d.get("tool", "")) [:15],
                             str(d.get("detail", "")) [:60]))
         elif st == "asking":
-            # A blocked question can sit for minutes while the user reads it, so
-            # it gets the long WAITING_MAX_AGE_S window, not STATE_STALE_S. It is
-            # cleared the moment the loop resumes (next PostToolUse -> working).
             if now - ts > WAITING_MAX_AGE_S:
                 f.unlink(missing_ok=True)
+                continue
+            if now - ts > DIALOG_STALE_S:
                 continue
             asking = True
         else:  # working / idle
