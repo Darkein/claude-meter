@@ -7,8 +7,6 @@
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
-#include "splash.h"
-#include "usage_rate.h"
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
@@ -19,6 +17,7 @@
 #include "hal/input_hal.h"
 #include "hal/power_hal.h"
 #include "hal/imu_hal.h"
+#include "hal/audio_hal.h"
 
 static UsageData usage = {};
 
@@ -55,8 +54,7 @@ static void rounder_cb(lv_event_t* e) {
 //           swallowed (mirrors the button wake-consumption); a press while
 //           awake counts as activity.
 //   false → touch never counts as activity and is fully swallowed while the
-//           panel is dark, so pets/sleeves can't wake it overnight and LVGL
-//           can't quietly toggle splash<->usage on a black panel.
+//           panel is dark, so pets/sleeves can't wake it overnight.
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x, y;
     bool pressed;
@@ -111,6 +109,14 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+
+    // Live Claude Code state (omitted on older daemons -> defaults to idle/no queue).
+    out->claude_state = (claude_state_t)(int)(doc["cs"] | 0);
+    out->approval_count = doc["aq"] | 0;
+    strlcpy(out->approval_sid, doc["as"] | "", sizeof(out->approval_sid));
+    strlcpy(out->pending_tool, doc["tn"] | "", sizeof(out->pending_tool));
+    strlcpy(out->pending_detail, doc["td"] | "", sizeof(out->pending_detail));
+
     out->valid = true;
     return true;
 }
@@ -192,6 +198,7 @@ void setup() {
     power_hal_init();
     imu_hal_init();
     touch_hal_init();
+    audio_hal_init();
 
     // ---- LVGL ----
     const int W = board_caps().width;
@@ -220,7 +227,7 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(SCREEN_USAGE);
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
         board_caps().name, W, H);
@@ -279,9 +286,9 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
+    audio_hal_tick();
     power_hal_tick();
     imu_hal_tick();
-    splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
@@ -290,8 +297,7 @@ void loop() {
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on splash: cycle animations; on usage: cycle brightness;
-    //               hold ~3s + release: pairing mode
+    //   PWR       → cycle brightness; hold ~3s + release: pairing mode
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
     // press. Activity bookkeeping happens inside idle_consume_wake_press
@@ -329,10 +335,7 @@ void loop() {
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
-                // On splash: cycle animations. On the usage view: cycle
-                // screen brightness (single non-splash view, no more screens).
-                if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-                else                                          brightness_cycle();
+                brightness_cycle();   // single usage view — PWR cycles brightness
             }
         }
 
@@ -359,14 +362,6 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
             ui_update(&usage);
             ble_send_ack();
         } else {

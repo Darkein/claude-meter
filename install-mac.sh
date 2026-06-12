@@ -33,9 +33,13 @@ if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet "bleak>=0.22" "httpx>=0.27"
+"$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/daemon/requirements.txt"
 PYTHON_BIN="$VENV_DIR/bin/python"
 echo "  OK ($PYTHON_BIN)"
+echo ""
+
+echo "[2b/5] Installing Claude Code hooks (state + remote approval)..."
+"$SCRIPT_DIR/daemon/install-hooks.sh"
 echo ""
 
 echo "[3/5] Rendering launchd plist..."

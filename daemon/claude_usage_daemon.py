@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
+from watchfiles import awatch
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -29,6 +30,12 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
+
+# Live Claude Code state: hooks write per-session files here; the daemon watches
+# the dir and translates them into the BLE payload. See daemon/hooks/.
+STATE_DIR = Path.home() / ".config" / "claude-usage-monitor" / "state"
+STATE_STALE_S = 30        # a working/idle file older than this is ignored (crashed session)
+WAITING_MAX_AGE_S = 86400  # prune a waiting file this old (abandoned permission prompt)
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -314,6 +321,94 @@ async def poll_api(token: str) -> dict | None:
     return payload
 
 
+# --- Live Claude Code state (hook state files -> BLE payload) ---------------
+#
+# The daemon holds NO authoritative state in memory: the durable truth is the
+# set of state/<sid>.json files the hooks write. build_state() re-derives the
+# whole picture from disk each time, so a daemon restart rebuilds the identical
+# queue and cannot desync.
+
+
+def _claude_state_fields() -> dict:
+    """Read STATE_DIR and return the live-state payload fields.
+
+    Returns {"cs", "aq", "as", "tn", "_queue"} where:
+      cs  = 0 idle / 1 working / 2 a permission prompt is pending /
+            3 no recent activity / 4 blocked on a user question (AskUserQuestion
+            or MCP elicitation — needs an answer, but no allow/deny)
+      aq  = number of sessions currently waiting for approval (queue length)
+      as  = front-of-queue session id (FIFO by ts), "" if none
+      tn  = front-of-queue pending tool name, "" if none
+      _queue = list of waiting sids (internal-only; stripped before BLE send)
+
+    cs=3 (NONE) when no fresh state file exists at all — distinct from cs=0
+    (IDLE), which means a session just finished its turn and is awaiting input.
+    Without this the device would show "Waiting for you" forever once any
+    session's idle file goes stale.
+
+    Priority when several sessions are live: permission (2) > question (4) >
+    working (1) > idle (0). A permission prompt and a question both block on the
+    user, so they outrank a merely-working session.
+    """
+    now = time.time()
+    activity = 3          # NONE until a fresh working/idle file is seen
+    activity_ts = -1.0
+    asking = False        # any fresh session blocked on AskUserQuestion/elicitation
+    waiting: list[tuple[float, str, str, str]] = []  # (ts, sid, tool, detail)
+
+    try:
+        files = list(STATE_DIR.glob("*.json"))
+    except OSError:
+        files = []
+
+    for f in files:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        st = d.get("state")
+        ts = float(d.get("ts", 0))
+        sid = d.get("sid") or f.stem
+        if st == "waiting":
+            if now - ts > WAITING_MAX_AGE_S:
+                # Abandoned past the hook's own timeout — prune it.
+                f.unlink(missing_ok=True)
+                continue
+            waiting.append((ts, sid, str(d.get("tool", "")) [:15],
+                            str(d.get("detail", "")) [:60]))
+        elif st == "asking":
+            # A blocked question can sit for minutes while the user reads it, so
+            # it gets the long WAITING_MAX_AGE_S window, not STATE_STALE_S. It is
+            # cleared the moment the loop resumes (next PostToolUse -> working).
+            if now - ts > WAITING_MAX_AGE_S:
+                f.unlink(missing_ok=True)
+                continue
+            asking = True
+        else:  # working / idle
+            if now - ts > STATE_STALE_S:
+                continue
+            cand = 1 if st == "working" else 0
+            # Newest ts wins; on a tie prefer working (more informative than idle).
+            if ts > activity_ts or (ts == activity_ts and cand > activity):
+                activity_ts = ts
+                activity = cand
+
+    waiting.sort(key=lambda x: x[0])  # FIFO: oldest first
+    if waiting:
+        _, front_sid, front_tool, front_detail = waiting[0]
+        return {
+            "cs": 2,
+            "aq": len(waiting),
+            "as": front_sid,
+            "tn": front_tool,
+            "td": front_detail,
+            "_queue": [w[1] for w in waiting],
+        }
+    if asking:
+        return {"cs": 4, "aq": 0, "as": "", "tn": "", "td": "", "_queue": []}
+    return {"cs": activity, "aq": 0, "as": "", "tn": "", "td": "", "_queue": []}
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -365,12 +460,31 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     session = Session(client)
     await session.setup_refresh_subscription()
 
-    last_poll = 0.0
-    used_successfully = False
-    try:
+    # The payload sent to the device = cached usage fields (refreshed on the 60s
+    # API poll) merged with live Claude-state fields (refreshed on file change).
+    # Always carry the usage fields so the firmware's bars never zero out.
+    last_usage: dict = {}
+    last_pushed: str | None = None
+    used = {"ok": False}
+
+    async def push() -> None:
+        nonlocal last_pushed
+        if not last_usage:
+            return  # nothing to render yet; wait for the first poll
+        state = _claude_state_fields()
+        state.pop("_queue", None)  # internal-only; never goes over BLE
+        merged = {**last_usage, **state}
+        blob = json.dumps(merged, separators=(",", ":"))
+        if blob == last_pushed:
+            return  # nothing changed — keep BLE quiet
+        if await session.write_payload(merged):
+            last_pushed = blob
+            used["ok"] = True
+
+    async def poll_loop() -> None:
+        last_poll = 0.0
         while client.is_connected and not stop_event.is_set():
-            now = time.time()
-            elapsed = now - last_poll
+            elapsed = time.time() - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 token = read_token()
@@ -379,14 +493,29 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 else:
                     payload = await poll_api(token)
                     if payload is not None:
-                        if await session.write_payload(payload):
-                            last_poll = time.time()
-                            used_successfully = True
-
+                        last_usage.clear()
+                        last_usage.update(payload)
+                        last_poll = time.time()
+                        await push()
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
             except asyncio.TimeoutError:
                 pass
+
+    async def watch_loop() -> None:
+        # Push once immediately (covers state files that already exist on connect),
+        # then on every change to the state dir.
+        await push()
+        try:
+            async for _ in awatch(STATE_DIR, stop_event=stop_event):
+                if not client.is_connected:
+                    break
+                await push()
+        except RuntimeError:
+            pass  # awatch can raise if the dir vanishes; poll_loop keeps us alive
+
+    try:
+        await asyncio.gather(poll_loop(), watch_loop())
     finally:
         try:
             await client.disconnect()
@@ -394,7 +523,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
-    return used_successfully
+    return used["ok"]
 
 
 async def main() -> None:
@@ -410,6 +539,8 @@ async def main() -> None:
             loop.add_signal_handler(sig, _stop)
         except NotImplementedError:
             signal.signal(sig, _stop)
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)  # so awatch has a target
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")

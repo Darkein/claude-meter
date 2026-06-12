@@ -1,0 +1,5 @@
+# Python dependencies for claude_usage_daemon.py (macOS / Linux).
+# Windows uses requirements-windows.txt.
+bleak>=0.22
+httpx>=0.27
+watchfiles>=0.21

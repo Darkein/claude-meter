@@ -41,6 +41,17 @@
 // ---- PMU ----
 #define AXP2101_ADDR         0x34
 
+// ---- Audio (ES8311 codec + speaker amp) ----
+// Codec sits on the shared I2C bus (SDA=8, SCL=7). I2S carries audio. The
+// speaker power amp's enable (PA_CTRL) is the AXP2101 ALDO2 rail, which
+// board_init() already brings up for the panel — no extra GPIO toggle needed.
+#define ES8311_ADDR          0x18   // 7-bit; CE tied low on this board
+#define I2S_MCLK_PIN         19
+#define I2S_BCLK_PIN         20
+#define I2S_LRCK_PIN         22
+#define I2S_DOUT_PIN         23     // MCU → codec (speaker)
+#define I2S_DIN_PIN          21     // codec → MCU (mic; unused here)
+
 // ---- Buttons ----
 // Three side-mounted buttons:
 //   BOOT (primary) — GPIO 9, sends Space (PTT) over BLE HID

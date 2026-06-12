@@ -263,6 +263,16 @@ void ble_send_nack(void) {
     }
 }
 
+void ble_send_approval(const char* sid, bool approve) {
+    if (state != BLE_STATE_CONNECTED || !tx_char) return;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"approve\":%s,\"sid\":\"%s\"}",
+             approve ? "true" : "false", sid ? sid : "");
+    tx_char->setValue(buf);
+    tx_char->notify();
+    Serial.printf("BLE: approval %s sid=%s\n", approve ? "true" : "false", sid ? sid : "");
+}
+
 void ble_request_refresh(void) {
     if (state == BLE_STATE_CONNECTED && req_char) {
         uint8_t v = 0x01;

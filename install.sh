@@ -11,10 +11,17 @@ echo ""
 
 # Check dependencies
 echo "[1/3] Checking dependencies..."
-for cmd in curl awk bluetoothctl busctl; do
+for cmd in curl awk bluetoothctl busctl jq; do
     command -v "$cmd" >/dev/null || { echo "Error: $cmd is required but not installed"; exit 1; }
 done
 echo "  All dependencies found"
+echo ""
+
+echo "[1b/3] Installing Claude Code hooks (state + remote approval)..."
+"$SCRIPT_DIR/daemon/install-hooks.sh"
+echo "  NOTE: the live-state + remote-approval features require the Python daemon"
+echo "  (daemon/claude_usage_daemon.py). The legacy bash daemon does not yet read"
+echo "  the hook state files."
 echo ""
 
 # Install systemd user service with resolved path
