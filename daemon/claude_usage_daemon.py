@@ -38,8 +38,15 @@ STATE_STALE_S = 120       # a working/idle file older than this is ignored (cras
                           # Sized to outlast a long-running tool: no hook fires between a
                           # tool's PreToolUse (working) and PostToolUse (working at the end),
                           # so a shorter window would falsely flip the device to idle mid-run.
-WAITING_MAX_AGE_S = 86400  # hard prune: delete a waiting/asking file this old (truly abandoned)
-DIALOG_STALE_S = 180      # ignore a waiting/asking file older than this. Pressing ESC to dismiss
+DIALOG_MIN_AGE_S = 2.5    # ignore a waiting/asking file YOUNGER than this. In acceptEdits mode
+                          # (or with an allowlist) PermissionRequest still fires for an
+                          # auto-granted tool, writing "waiting" ~instantly before PreToolUse
+                          # overwrites it with "working". That transient file would otherwise
+                          # flash the device's approval screen for one daemon tick. A real
+                          # human-facing prompt always outlives this window; an auto-grant
+                          # round-trip never does. This is the fix for the "asking screen
+                          # flashes ~1s every ~30s" bug across many concurrent sessions.
+DIALOG_STALE_S = 180      # delete a waiting/asking file older than this. Pressing ESC to dismiss
                           # a permission OR AskUserQuestion dialog fires NO hook (confirmed: only
                           # mid-generation ESC emits Stop), so a cancelled dialog's state file is
                           # never cleared by an event. This timeout is the only thing that clears
@@ -339,6 +346,18 @@ async def poll_api(token: str) -> dict | None:
 # queue and cannot desync.
 
 
+# Per-sid bookkeeping for the "is this 'waiting' a real blocked prompt, or just
+# an auto-granted tool stream?" distinguisher. A genuinely-pending permission
+# prompt FREEZES the agentic loop: the session writes no further state files, so
+# its waiting-file ts stays put. An auto-granted stream (acceptEdits mode, or a
+# long-lived session whose hook config predates the PreToolUse clearing hook)
+# keeps rewriting "waiting" with an ADVANCING ts as each tool runs and nothing
+# clears it. We only trust a "waiting" file as a real prompt once its ts has held
+# steady across a couple of reads. Maps sid -> (waiting_ts, times_seen_unchanged).
+_waiting_seen: dict[str, tuple[float, int]] = {}
+WAITING_STABLE_READS = 2  # consecutive reads with an unchanged ts before we believe it
+
+
 def _claude_state_fields() -> dict:
     """Read STATE_DIR and return the live-state payload fields.
 
@@ -365,6 +384,7 @@ def _claude_state_fields() -> dict:
     activity_ts = -1.0
     asking = False        # any fresh session blocked on AskUserQuestion/elicitation
     waiting: list[tuple[float, str, str, str]] = []  # (ts, sid, tool, detail)
+    live_sids: set[str] = set()  # sids seen this read, to prune _waiting_seen
 
     try:
         files = list(STATE_DIR.glob("*.json"))
@@ -380,21 +400,50 @@ def _claude_state_fields() -> dict:
         ts = float(d.get("ts", 0))
         sid = d.get("sid") or f.stem
         if st == "waiting":
-            if now - ts > WAITING_MAX_AGE_S:
+            live_sids.add(sid)
+            if now - ts > DIALOG_STALE_S:
+                # Past the dialog window with no hook to clear it — either an
+                # ESC-dismissed dialog (no hook fires) or a truly abandoned
+                # prompt. Delete it so ghosts don't accumulate on disk and can
+                # never re-raise the approval screen. (Old code only skipped it
+                # and kept the file for 24h, which is what left stale
+                # AskUserQuestion "waiting" files lying around.)
                 f.unlink(missing_ok=True)
                 continue
-            if now - ts > DIALOG_STALE_S:
-                # Likely an ESC-dismissed dialog (no hook clears it) — ignore so
-                # the device falls back to the activity state. Keep the file for
-                # the hard-prune above in case it IS still pending.
+            if now - ts < DIALOG_MIN_AGE_S:
+                # Too young to trust — likely an auto-grant transient that
+                # PreToolUse is about to overwrite with "working". Skip it this
+                # tick; if it's a real prompt it'll still be here next tick.
+                continue
+            # Re-arm guard: only believe this is a real, blocked prompt once its
+            # ts has held steady across WAITING_STABLE_READS reads. A session
+            # that keeps advancing its waiting-ts is actively running tools
+            # (auto-grant / stale-hook stream), NOT blocked on a human — count it
+            # as working activity instead of raising the approval screen.
+            prev_ts, seen = _waiting_seen.get(sid, (0.0, 0))
+            if ts != prev_ts:
+                _waiting_seen[sid] = (ts, 1)
+                # ts moved since last read -> still streaming. Treat as working.
+                if ts > activity_ts:
+                    activity_ts = ts
+                    activity = 1
+                continue
+            seen += 1
+            _waiting_seen[sid] = (ts, seen)
+            if seen < WAITING_STABLE_READS:
+                # Stable for the first time but not yet long enough — treat as
+                # working this tick; promote to a real prompt on the next read.
+                if ts > activity_ts:
+                    activity_ts = ts
+                    activity = 1
                 continue
             waiting.append((ts, sid, str(d.get("tool", "")) [:15],
                             str(d.get("detail", "")) [:60]))
         elif st == "asking":
-            if now - ts > WAITING_MAX_AGE_S:
+            if now - ts > DIALOG_STALE_S:
                 f.unlink(missing_ok=True)
                 continue
-            if now - ts > DIALOG_STALE_S:
+            if now - ts < DIALOG_MIN_AGE_S:
                 continue
             asking = True
         else:  # working / idle
@@ -405,6 +454,12 @@ def _claude_state_fields() -> dict:
             if ts > activity_ts or (ts == activity_ts and cand > activity):
                 activity_ts = ts
                 activity = cand
+
+    # Drop bookkeeping for sids no longer in "waiting" (answered, cleared, or
+    # gone) so a later prompt from the same session starts its stable-count
+    # fresh rather than inheriting a stale one.
+    for dead in [s for s in _waiting_seen if s not in live_sids]:
+        del _waiting_seen[dead]
 
     waiting.sort(key=lambda x: x[0])  # FIFO: oldest first
     if waiting:
@@ -539,7 +594,34 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     return used["ok"]
 
 
+def _acquire_single_instance() -> "object":
+    """Refuse to start if another daemon already holds the lock.
+
+    Two daemons fight over the one BLE device (each disconnects the other),
+    which manifests as the device flickering between live data and the pairing
+    screen. A whole-file flock on a lockfile is released automatically if the
+    holder dies, so a crashed daemon never wedges the next start. Returns the
+    open file handle, which the caller must keep alive for the process's
+    lifetime (closing it drops the lock).
+    """
+    import fcntl
+
+    lock_path = STATE_DIR.parent / "daemon.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log(f"Another daemon already running (lock held: {lock_path}); exiting.")
+        fh.close()
+        sys.exit(0)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
 async def main() -> None:
+    _lock = _acquire_single_instance()  # held for process lifetime; do not close
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 

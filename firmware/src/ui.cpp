@@ -5,6 +5,7 @@
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "hal/audio_hal.h"
+#include "ble.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -111,7 +112,8 @@ static void compute_layout(const BoardCaps &c)
 static lv_obj_t *usage_container;
 static lv_obj_t *lbl_title;
 static lv_obj_t *usage_group; // the two usage panels — shown when connected
-static lv_obj_t *pair_group;  // pairing hint — shown when disconnected
+static lv_obj_t *pair_group;        // pairing hint — shown when disconnected
+static lv_obj_t *pair_title;        // title label — "Waiting for host" vs "Pairing…"
 static lv_obj_t *bar_session;
 static lv_obj_t *lbl_session_pct;
 static lv_obj_t *lbl_session_label;
@@ -429,11 +431,11 @@ static void build_pair_group(lv_obj_t *parent)
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t *l1 = lv_label_create(pair_group);
-    lv_label_set_text(l1, "To pair");
-    lv_obj_set_style_text_font(l1, L.bt_status_font, 0);
-    lv_obj_set_style_text_color(l1, COL_TEXT, 0);
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 40);
+    pair_title = lv_label_create(pair_group);
+    lv_label_set_text(pair_title, "Waiting for host");
+    lv_obj_set_style_text_font(pair_title, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(pair_title, COL_TEXT, 0);
+    lv_obj_align(pair_title, LV_ALIGN_TOP_MID, 0, 40);
 
     lv_obj_t *l2 = lv_label_create(pair_group);
     lv_label_set_text(l2, "hold the power button");
@@ -719,6 +721,21 @@ static void update_view_state(void)
     else
     {
         v = 1; // idle / Zzz
+    }
+    // Refresh the pairing title whenever bond state flips, even with no view
+    // change — the 3s-hold can clear bonds while already on the pair screen.
+    // Bonds present => a host paired before, just not connected (e.g. laptop
+    // asleep). No bonds => fresh/cleared, waiting for first pairing.
+    if (v == 0 && pair_title)
+    {
+        static int last_bonds = -1;
+        int bonds = ble_has_bonds() ? 1 : 0;
+        if (bonds != last_bonds)
+        {
+            last_bonds = bonds;
+            lv_label_set_text(pair_title,
+                              bonds ? "Waiting for host" : "Pairing\xE2\x80\xA6");
+        }
     }
     if (v == view_state)
         return;
