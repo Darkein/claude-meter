@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
+"""Claude Usage Tracker Daemon (BLE) — primary cross-platform daemon (macOS/Linux).
 
 Polls Claude API rate-limit headers and writes a JSON payload to the
 ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
@@ -46,13 +46,14 @@ DIALOG_MIN_AGE_S = 2.5    # ignore a waiting/asking file YOUNGER than this. In a
                           # human-facing prompt always outlives this window; an auto-grant
                           # round-trip never does. This is the fix for the "asking screen
                           # flashes ~1s every ~30s" bug across many concurrent sessions.
-DIALOG_STALE_S = 180      # delete a waiting/asking file older than this. Pressing ESC to dismiss
+DIALOG_STALE_S = 600      # delete a waiting/asking file older than this. Pressing ESC to dismiss
                           # a permission OR AskUserQuestion dialog fires NO hook (confirmed: only
                           # mid-generation ESC emits Stop), so a cancelled dialog's state file is
                           # never cleared by an event. This timeout is the only thing that clears
-                          # it. A human leaving a real prompt unanswered >3min is rare; the cost of
-                          # being wrong (device under-shows a slow human) is far below the old bug
-                          # (device stuck "permission pending" for 24h after every ESC).
+                          # it. Raised from 180s to 10min: now that the device can swipe between
+                          # screens, a real prompt the user is reading shouldn't time out from the
+                          # screen prematurely. Still bounded so an ESC-dismissed dialog clears well
+                          # before the 24h hard-prune that originally caused stuck "pending" screens.
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -304,6 +305,13 @@ async def poll_api(token: str) -> dict | None:
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
+    if resp.status_code in (401, 403):
+        # The token is re-read from Keychain/credentials on every poll (see
+        # poll_loop), so an expired token self-heals the moment you re-login to
+        # Claude Code — no daemon restart needed. Say so, instead of a bare code.
+        log(f"API HTTP {resp.status_code}: auth failed — token likely expired; "
+            f"re-login to Claude Code (the daemon picks up the new token on the next poll)")
+        return None
     if resp.status_code >= 400:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -327,6 +335,13 @@ async def poll_api(token: str) -> dict | None:
         except ValueError:
             return 0
 
+    # Wall-clock for the device's clock screen. The device has no timezone, so
+    # we send *local wall time* as an epoch (UTC epoch + gmtoff): the firmware
+    # stores and displays it verbatim. Lives in the 60s-poll payload (not the
+    # per-change push) so it doesn't defeat the push dedup or spam BLE.
+    lt = time.localtime()
+    wall_epoch = int(time.mktime(lt)) + lt.tm_gmtoff
+
     payload = {
         "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
         "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
@@ -334,6 +349,7 @@ async def poll_api(token: str) -> dict | None:
         "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
+        "t": wall_epoch,
     }
     return payload
 
@@ -343,7 +359,9 @@ async def poll_api(token: str) -> dict | None:
 # The daemon holds NO authoritative state in memory: the durable truth is the
 # set of state/<sid>.json files the hooks write. build_state() re-derives the
 # whole picture from disk each time, so a daemon restart rebuilds the identical
-# queue and cannot desync.
+# queue and cannot desync. (Caveat: _waiting_seen below — the stable-read
+# counter — IS in-memory only, so a restart re-incurs the WAITING_STABLE_READS
+# delay for an in-flight prompt. Self-healing within a couple of reads.)
 
 
 # Per-sid bookkeeping for the "is this 'waiting' a real blocked prompt, or just
@@ -356,18 +374,22 @@ async def poll_api(token: str) -> dict | None:
 # steady across a couple of reads. Maps sid -> (waiting_ts, times_seen_unchanged).
 _waiting_seen: dict[str, tuple[float, int]] = {}
 WAITING_STABLE_READS = 2  # consecutive reads with an unchanged ts before we believe it
+MAX_Q = 4  # max approvals sent over BLE. Bounded so the worst-case JSON fits the
+           # device's 512-byte RX buffer: 4 x (tool<=15 + detail<=60) ~= 470 bytes
+           # with the usage fields. The sid is NOT sent (the device never displays
+           # it). aq still reports the true total for the "i / N" badge.
 
 
 def _claude_state_fields() -> dict:
     """Read STATE_DIR and return the live-state payload fields.
 
-    Returns {"cs", "aq", "as", "tn", "_queue"} where:
+    Returns {"cs", "aq", "q", "_queue"} where:
       cs  = 0 idle / 1 working / 2 a permission prompt is pending /
             3 no recent activity / 4 blocked on a user question (AskUserQuestion
             or MCP elicitation — needs an answer, but no allow/deny)
-      aq  = number of sessions currently waiting for approval (queue length)
-      as  = front-of-queue session id (FIFO by ts), "" if none
-      tn  = front-of-queue pending tool name, "" if none
+      aq  = number of sessions currently waiting for approval (true total)
+      q   = bounded list (<= MAX_Q) of {s: sid, tn: tool, td: detail}, FIFO order,
+            so the device can swipe through each pending approval
       _queue = list of waiting sids (internal-only; stripped before BLE send)
 
     cs=3 (NONE) when no fresh state file exists at all — distinct from cs=0
@@ -463,18 +485,21 @@ def _claude_state_fields() -> dict:
 
     waiting.sort(key=lambda x: x[0])  # FIFO: oldest first
     if waiting:
-        _, front_sid, front_tool, front_detail = waiting[0]
+        # Send the queue (bounded) so the device can swipe between pending
+        # approvals, not just the front. aq stays the true total (may exceed
+        # MAX_Q -> the device shows "i / aq"). q is the bounded detail list; the
+        # sid is omitted (the device doesn't display it) to save BLE bytes.
+        q = [{"tn": tool, "td": detail}
+             for (_, _sid, tool, detail) in waiting[:MAX_Q]]
         return {
             "cs": 2,
             "aq": len(waiting),
-            "as": front_sid,
-            "tn": front_tool,
-            "td": front_detail,
+            "q": q,
             "_queue": [w[1] for w in waiting],
         }
     if asking:
-        return {"cs": 4, "aq": 0, "as": "", "tn": "", "td": "", "_queue": []}
-    return {"cs": activity, "aq": 0, "as": "", "tn": "", "td": "", "_queue": []}
+        return {"cs": 4, "aq": 0, "q": [], "_queue": []}
+    return {"cs": activity, "aq": 0, "q": [], "_queue": []}
 
 
 class Session:

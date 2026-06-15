@@ -18,6 +18,7 @@ struct BoardCaps {
     bool    has_rotation;    // IMU-driven CPU rotation in the flush callback
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
+    bool    has_rtc;         // PCF85063 (or compatible) keeps wall-clock time offline
 };
 
 const BoardCaps& board_caps(void);

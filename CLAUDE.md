@@ -121,6 +121,7 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Recent session highlights
 
+- **Project audit (2026-06-13).** Full feature inventory + prioritized stability/improvement backlog in [`docs/audit.md`](docs/audit.md). Living doc — consult before planning fixes. Covers the Claude live-state pipeline in depth (hooks → daemon heuristics → firmware), a remote-approval improvement roadmap, and a list of verified-false findings not to re-chase.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
 - Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
 - Migrated from Panlee SC01 Plus (480×320 IPS) to Waveshare 2.16" AMOLED (480×480 square). Full hardware/library swap.
@@ -132,16 +133,17 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+Python daemon (`daemon/claude_usage_daemon.py`, run via bleak) is the single cross-platform daemon: reads the OAuth token (macOS Keychain / `~/.claude/.credentials.json`), polls the Anthropic API, AND drives the live Claude Code state pipeline from the hook state files. macOS uses launchd (`install-mac.sh`), Linux uses a systemd user unit (`install.sh` → `systemctl --user start claude-usage-daemon`); both render `ExecStart` to `<venv>/bin/python …/claude_usage_daemon.py`. Windows: `claude_usage_daemon_windows.py`. (The old bash daemon was usage-only and has been removed.)
 
 **Discovery & resilience:**
 
-- Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
-- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
-- `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
+- Connects by name (`"Clawdmeter"`); Linux caches the resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
+- On connect failure: Linux drops the cached address; macOS skips the stale CoreBluetooth handle one cycle so the scan fallback is reachable. Exponential backoff 1→60s, reset on success.
+- Single-instance flock at `~/.config/claude-usage-monitor/daemon.lock` (two daemons would fight over the one BLE link).
+- `POLL_INTERVAL=60`, `TICK=5`. `poll_loop` polls when 60s elapsed OR the ESP fires a refresh; `watch_loop` (watchfiles) pushes on every hook-state change.
 
 **GATT characteristics on service `4c41555a-...0001`:**
 
 - `...0002` RX — daemon writes JSON usage payload here.
 - `...0003` TX — firmware notifies ack/nack (daemon doesn't subscribe).
-- `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. Daemon subscribes via `setsid bash -c "stdbuf -oL dbus-monitor … | awk …"`; awk drops a flag file the inner loop picks up. See the `feedback_dbus_monitor_pipe` memory for the three subtle gotchas (pipe buffering, busctl-exits race, `wait` blocking on pipeline jobs).
+- `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. The Python daemon subscribes with bleak `start_notify(REQ_CHAR_UUID)`; the callback sets an asyncio event that wakes `poll_loop` for an immediate poll.

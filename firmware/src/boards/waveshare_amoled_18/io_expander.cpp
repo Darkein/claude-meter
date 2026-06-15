@@ -40,12 +40,17 @@ bool io_expander_init(void) {
     }
     // Hold display + touch in reset.
     output_state = 0x00;
-    write_reg(IOX_REG_OUTPUT, output_state);
+    bool ok = write_reg(IOX_REG_OUTPUT, output_state);
     delay(20);
-    // Release resets and enable audio amp output line.
+    // Release resets and enable audio amp output line. A failed write here leaves
+    // the display + touch stuck in reset (silent black screen) — surface it.
     output_state = IOX_OUTPUT_DEFAULT;
-    write_reg(IOX_REG_OUTPUT, output_state);
+    ok = write_reg(IOX_REG_OUTPUT, output_state) && ok;
     delay(20);
+    if (!ok) {
+        Serial.println("XCA9554 init failed (output) — display/touch may stay in reset");
+        return false;
+    }
     Serial.println("XCA9554 init OK");
     return true;
 }

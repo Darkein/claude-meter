@@ -7,6 +7,7 @@
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
+#include "clock.h"
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
@@ -110,13 +111,22 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    out->host_epoch = doc["t"] | 0u;
 
     // Live Claude Code state (omitted on older daemons -> defaults to idle/no queue).
     out->claude_state = (claude_state_t)(int)(doc["cs"] | 0);
     out->approval_count = doc["aq"] | 0;
-    strlcpy(out->approval_sid, doc["as"] | "", sizeof(out->approval_sid));
-    strlcpy(out->pending_tool, doc["tn"] | "", sizeof(out->pending_tool));
-    strlcpy(out->pending_detail, doc["td"] | "", sizeof(out->pending_detail));
+
+    // Bounded approval queue. Each entry: {tn: tool, td: detail}.
+    out->approval_n = 0;
+    JsonArrayConst q = doc["q"].as<JsonArrayConst>();
+    for (JsonObjectConst item : q) {
+        if (out->approval_n >= MAX_APPROVALS)
+            break;
+        Approval &a = out->approvals[out->approval_n++];
+        strlcpy(a.tool, item["tn"] | "", sizeof(a.tool));
+        strlcpy(a.detail, item["td"] | "", sizeof(a.detail));
+    }
 
     out->valid = true;
     return true;
@@ -200,6 +210,7 @@ void setup() {
     imu_hal_init();
     touch_hal_init();
     audio_hal_init();
+    clock_init();       // seed wall-clock from the RTC if the board has one
 
     // ---- LVGL ----
     const int W = board_caps().width;
@@ -210,6 +221,14 @@ void setup() {
 
     buf1 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
     buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
+    // A null buffer would feed lv_display_set_buffers() garbage and crash on the
+    // first render — indistinguishable from a hang. Most likely on the C6 (no
+    // PSRAM: both buffers come from internal SRAM). Fail loud instead.
+    if (!buf1 || !buf2) {
+        Serial.printf("FATAL: LVGL buffer alloc failed (%d x %d x 2 each)\n", W, BUF_LINES);
+        Serial.flush();
+        for (;;) delay(1000);
+    }
 
     lv_display_t* disp = lv_display_create(W, H);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
@@ -323,7 +342,10 @@ void loop() {
         }
 
         if (power_hal_pwr_pressed()) {
-            (void)idle_consume_wake_press();  // PWR only wakes; pairing is the hold gesture
+            // PWR toggles the screen: wakes if asleep (consume_wake_press
+            // returns true), otherwise puts it to sleep. Pairing is the hold
+            // gesture (pair_tick), independent of this short-press toggle.
+            if (!idle_consume_wake_press()) idle_sleep_now();
         }
 
         pair_tick();
@@ -349,6 +371,7 @@ void loop() {
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {
+            if (usage.host_epoch) clock_sync_epoch(usage.host_epoch);
             ui_update(&usage);
             ble_send_ack();
         } else {

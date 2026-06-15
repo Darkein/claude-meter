@@ -20,5 +20,3 @@ const char* ble_get_data(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);
-// Notify the daemon of a remote approval decision for a specific Claude session.
-void ble_send_approval(const char* sid, bool approve);

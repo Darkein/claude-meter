@@ -20,12 +20,12 @@ SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 1
 TOOL=$(printf '%s' "$IN" | jq -r '.tool_name // ""')
 
-# AskUserQuestion raises a permission dialog too, but it is a "pick an answer"
-# prompt, not an allow/deny — the PreToolUse:AskUserQuestion hook already set
-# "asking" (cs=4). Don't clobber it with "waiting" (cs=2) here, or the device
-# shows an Allow/Deny screen for a tool that has neither. Let asking stand;
-# exit non-blocking like every other path in this hook.
-[ "$TOOL" = "AskUserQuestion" ] && exit 1
+# AskUserQuestion and ExitPlanMode raise a dialog too, but they are "pick an
+# answer" / "approve a plan" prompts, not allow/deny — their PreToolUse matchers
+# already set "asking" (cs=4). Don't clobber that with "waiting" (cs=2) here, or
+# the device shows an Allow/Deny screen for a prompt that has neither. Let asking
+# stand; exit non-blocking like every other path in this hook.
+case "$TOOL" in AskUserQuestion|ExitPlanMode) exit 1 ;; esac
 
 # A short human detail to show under the tool name (mirrors what Claude Code's
 # own prompt highlights): the command for Bash, the path for file tools, the

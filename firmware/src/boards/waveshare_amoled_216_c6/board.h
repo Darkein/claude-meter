@@ -41,6 +41,9 @@
 // ---- PMU ----
 #define AXP2101_ADDR         0x34
 
+// ---- RTC (PCF85063 on the shared I2C bus) ----
+#define PCF85063_ADDR        0x51
+
 // ---- Audio (ES8311 codec + speaker amp) ----
 // Codec sits on the shared I2C bus (SDA=8, SCL=7). I2S carries audio. The
 // speaker power amp's enable (PA_CTRL) is the AXP2101 ALDO2 rail, which
@@ -68,3 +71,4 @@
 #define BOARD_HAS_IMU              1    // present + initialized for I2C bus health
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio
+#define BOARD_HAS_RTC              1    // PCF85063 keeps wall-clock time offline

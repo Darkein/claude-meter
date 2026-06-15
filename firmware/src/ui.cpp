@@ -5,7 +5,11 @@
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "hal/audio_hal.h"
+#include "hal/power_hal.h"
 #include "ble.h"
+#include "clock.h"
+#include "idle.h"
+#include <time.h>
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -143,6 +147,12 @@ static bool data_received = false;           // any valid update since boot
 static int view_state = -1;                  // -1 unknown / 0 pair / 1 idle / 2 usage
 static const uint32_t DATA_FRESH_MS = 90000; // usage counts as "live" within this window (daemon sends ~60s)
 
+// ---- Clock screen (wall-clock + date + battery) ----
+static lv_obj_t *clock_container;
+static lv_obj_t *lbl_clock_time;
+static lv_obj_t *lbl_clock_date;
+static lv_obj_t *lbl_clock_batt;
+
 // ---- Permission screen (mirrors Claude Code's permission prompt, info-only) ----
 static lv_obj_t *approval_container;
 static lv_obj_t *lbl_approval_count;  // "1 / 3" badge (hidden when count == 1)
@@ -151,10 +161,10 @@ static lv_obj_t *lbl_approval_detail; // command / path / url
 
 // ---- Cached live Claude Code state (from ui_update) ----
 static claude_state_t s_claude_state = CLAUDE_IDLE;
-static int s_approval_count = 0;
-static char s_approval_sid[40] = "";
-static char s_pending_tool[16] = "";
-static char s_pending_detail[64] = "";
+static int s_approval_count = 0;                 // aq — true total (may exceed s_approval_n)
+static Approval s_approvals[MAX_APPROVALS];      // q — bounded detail list
+static uint8_t s_approval_n = 0;                 // entries filled in s_approvals
+static uint8_t s_approval_view_idx = 0;          // which approval the screen shows
 static uint32_t s_idle_since_ms = 0; // when CLAUDE_IDLE was entered ("Finished!" 10s window)
 #define IDLE_FINISHED_MS 10000
 
@@ -430,6 +440,7 @@ static void build_pair_group(lv_obj_t *parent)
     lv_obj_set_style_pad_all(pair_group, 0, 0);
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(pair_group, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     pair_title = lv_label_create(pair_group);
     lv_label_set_text(pair_title, "Waiting for host");
@@ -465,6 +476,7 @@ static void build_idle_group(lv_obj_t *parent)
     lv_obj_set_style_pad_all(idle_group, 0, 0);
     lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
@@ -485,6 +497,7 @@ static void init_usage_screen(lv_obj_t *scr)
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(usage_container, LV_OBJ_FLAG_GESTURE_BUBBLE); // swipe -> screen cb
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -502,6 +515,7 @@ static void init_usage_screen(lv_obj_t *scr)
     lv_obj_set_style_pad_all(usage_group, 0, 0);
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(usage_group, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -522,6 +536,74 @@ static void init_usage_screen(lv_obj_t *scr)
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
+// ======== Clock Screen ========
+//
+// Big 24h HH:MM, French date below, battery % at the bottom. Reached by
+// swiping. Time comes from the shared clock module (host epoch + millis, RTC
+// seed on boards that have one); shows "--:--" until the first sync.
+
+static void init_clock_screen(lv_obj_t *scr)
+{
+    clock_container = lv_obj_create(scr);
+    lv_obj_set_size(clock_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(clock_container, 0, 0);
+    lv_obj_set_style_bg_opa(clock_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(clock_container, 0, 0);
+    lv_obj_set_style_pad_all(clock_container, 0, 0);
+    lv_obj_clear_flag(clock_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(clock_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    lbl_clock_time = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_time, "--:--");
+    lv_obj_set_style_text_font(lbl_clock_time, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_clock_time, COL_TEXT, 0);
+    lv_obj_align(lbl_clock_time, LV_ALIGN_CENTER, 0, -40);
+
+    lbl_clock_date = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_date, "");
+    lv_obj_set_style_text_font(lbl_clock_date, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_clock_date, COL_DIM, 0);
+    lv_obj_align(lbl_clock_date, LV_ALIGN_CENTER, 0, 30);
+
+    lbl_clock_batt = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_batt, "");
+    lv_obj_set_style_text_font(lbl_clock_batt, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_clock_batt, COL_DIM, 0);
+    lv_obj_align(lbl_clock_batt, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+    lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN); // shown via swipe
+}
+
+// Refresh the clock labels from the shared clock + battery. Called each loop
+// from ui_tick_anim() while SCREEN_CLOCK is active.
+static void clock_refresh(void)
+{
+    static const char *const jours[7] = {"dim.", "lun.", "mar.", "mer.",
+                                         "jeu.", "ven.", "sam."};
+    static const char *const mois[12] = {"janv.", "fevr.", "mars",  "avr.",
+                                         "mai",   "juin",  "juil.", "aout",
+                                         "sept.", "oct.",  "nov.",  "dec."};
+    struct tm tmv;
+    if (!clock_now(&tmv))
+    {
+        lv_label_set_text(lbl_clock_time, "--:--");
+        lv_label_set_text(lbl_clock_date, "");
+    }
+    else
+    {
+        lv_label_set_text_fmt(lbl_clock_time, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+        int wd = tmv.tm_wday % 7;
+        int mo = tmv.tm_mon % 12;
+        lv_label_set_text_fmt(lbl_clock_date, "%s %d %s", jours[wd], tmv.tm_mday, mois[mo]);
+    }
+
+    int pct = power_hal_battery_pct();
+    if (pct < 0)
+        lv_label_set_text(lbl_clock_batt, "");
+    else
+        lv_label_set_text_fmt(lbl_clock_batt, "%d %%", pct);
+}
+
 // ======== Approval Screen ========
 //
 // Shown automatically when the daemon reports a pending tool-permission prompt
@@ -538,6 +620,7 @@ static void init_approval_screen(lv_obj_t *scr)
     lv_obj_set_style_border_width(approval_container, 0, 0);
     lv_obj_set_style_pad_all(approval_container, 0, 0);
     lv_obj_clear_flag(approval_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(approval_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     // Header: "Permission" + optional "1 / N" queue badge.
     lbl_approval_count = lv_label_create(approval_container);
@@ -572,34 +655,59 @@ static void init_approval_screen(lv_obj_t *scr)
     lv_obj_add_flag(approval_container, LV_OBJ_FLAG_HIDDEN); // ui_update decides
 }
 
-// Refresh the permission-screen labels from the cached front-of-queue request.
+// Refresh the permission-screen labels from the approval the user is viewing
+// (s_approval_view_idx into the cached queue).
 static void approval_refresh_labels(void)
 {
     if (!lbl_approval_tool)
         return;
 
+    // Clamp the view index to the live queue (it can shrink as prompts resolve).
+    if (s_approval_n == 0)
+        s_approval_view_idx = 0;
+    else if (s_approval_view_idx >= s_approval_n)
+        s_approval_view_idx = s_approval_n - 1;
+
+    const Approval *a = (s_approval_n > 0) ? &s_approvals[s_approval_view_idx] : nullptr;
+    const char *tool = a ? a->tool : "";
+    const char *detail = a ? a->detail : "";
+
     // The daemon sends the raw tool_name (e.g. "Bash", "Write", or
     // "AskUserQuestion"). AskUserQuestion isn't a permission prompt — it's
     // Claude asking the user a question — so show natural wording for it and
     // keep the real tool name otherwise.
-    bool is_question = (strcmp(s_pending_tool, "AskUserQuestion") == 0);
+    bool is_question = (strcmp(tool, "AskUserQuestion") == 0);
     const char *title = is_question ? "Claude is asking"
-                                    : (s_pending_tool[0] ? s_pending_tool : "Tool");
+                                    : (tool[0] ? tool : "Tool");
     lv_label_set_text(lbl_approval_tool, title);
-    lv_label_set_text(lbl_approval_detail, s_pending_detail);
+    lv_label_set_text(lbl_approval_detail, detail);
 
     // Center the title on the Y axis when there's no detail line under it
     // (typical for a question); nudge it up to make room when a detail shows.
-    lv_obj_align(lbl_approval_tool, LV_ALIGN_CENTER, 0,
-                 s_pending_detail[0] ? -30 : 0);
+    lv_obj_align(lbl_approval_tool, LV_ALIGN_CENTER, 0, detail[0] ? -30 : 0);
 
+    // Badge shows the viewed position within the true total (aq may exceed the
+    // bounded queue we actually received).
+    int pos = s_approval_view_idx + 1;
     if (s_approval_count > 1)
-        lv_label_set_text_fmt(lbl_approval_count, "Permission  1 / %d", s_approval_count);
+        lv_label_set_text_fmt(lbl_approval_count, "Permission  %d / %d", pos, s_approval_count);
     else
         lv_label_set_text(lbl_approval_count, is_question ? "Question" : "Permission");
 }
 
 // ======== Public API ========
+
+// Screen-level swipe handler. LVGL emits LV_EVENT_GESTURE on the active screen
+// after the indev decodes a fling. Left->right (LV_DIR_RIGHT) = next screen.
+static void screen_gesture_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
+    if (d == LV_DIR_RIGHT)
+        ui_swipe(+1);
+    else if (d == LV_DIR_LEFT)
+        ui_swipe(-1);
+}
 
 void ui_init(void)
 {
@@ -608,12 +716,14 @@ void ui_init(void)
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(scr, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
     init_volume_icons();
 
     init_usage_screen(scr);
+    init_clock_screen(scr);
     init_approval_screen(scr);
 
     logo_img = lv_image_create(scr);
@@ -670,13 +780,26 @@ void ui_update(const UsageData *data)
             audio_hal_play(SND_ALERT);
         else if (data->claude_state == CLAUDE_IDLE && s_claude_state == CLAUDE_WORKING)
             audio_hal_play(SND_DONE);
+
+        // Wake the panel on any Claude-state edge so the user sees what just
+        // changed (turn finished, attention needed, work started).
+        if (data->claude_state != CLAUDE_NONE)
+            idle_wake();
     }
+
+    // Keep the panel awake while Claude is actively doing something. The daemon
+    // re-sends the same cs periodically, so this resets the idle timer on every
+    // update and the screen won't sleep mid-work.
+    if (data->claude_state == CLAUDE_WORKING ||
+        data->claude_state == CLAUDE_WAITING ||
+        data->claude_state == CLAUDE_QUESTION)
+        idle_note_activity();
 
     s_claude_state = data->claude_state;
     s_approval_count = data->approval_count;
-    strlcpy(s_approval_sid, data->approval_sid, sizeof(s_approval_sid));
-    strlcpy(s_pending_tool, data->pending_tool, sizeof(s_pending_tool));
-    strlcpy(s_pending_detail, data->pending_detail, sizeof(s_pending_detail));
+    s_approval_n = data->approval_n;
+    for (uint8_t i = 0; i < s_approval_n; i++)
+        s_approvals[i] = data->approvals[i];
     apply_claude_state();
 
     last_data_ms = lv_tick_get(); // a valid usage update just landed → dot goes green
@@ -750,6 +873,11 @@ static void update_view_state(void)
 
 void ui_tick_anim(void)
 {
+    if (current_screen == SCREEN_CLOCK)
+    {
+        clock_refresh();
+        return;
+    }
     if (current_screen != SCREEN_USAGE)
         return;
     update_view_state();
@@ -832,6 +960,8 @@ static void apply_battery_visibility(void)
 void ui_show_screen(screen_t screen)
 {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (clock_container)
+        lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
     if (approval_container)
         lv_obj_add_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
 
@@ -839,6 +969,10 @@ void ui_show_screen(screen_t screen)
     {
     case SCREEN_USAGE:
         lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+        break;
+    case SCREEN_CLOCK:
+        lv_obj_clear_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
+        clock_refresh(); // paint immediately so the swipe-in isn't blank
         break;
     case SCREEN_APPROVAL:
         lv_obj_clear_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
@@ -859,6 +993,37 @@ screen_t ui_get_current_screen(void)
     return current_screen;
 }
 
+// Carousel navigation. Virtual slot order: [Usage, Clock] + one slot per
+// pending approval (s_approval_n). The approval slots map to SCREEN_APPROVAL
+// with s_approval_view_idx selecting which one. Wraps around.
+void ui_swipe(int dir)
+{
+    if (dir == 0)
+        return;
+
+    int total = 2 + s_approval_n;      // Usage, Clock, then each approval
+    int cur;
+    if (current_screen == SCREEN_USAGE)
+        cur = 0;
+    else if (current_screen == SCREEN_CLOCK)
+        cur = 1;
+    else // SCREEN_APPROVAL
+        cur = 2 + (s_approval_n ? s_approval_view_idx : 0);
+
+    int next = ((cur + dir) % total + total) % total;
+
+    if (next == 0)
+        ui_show_screen(SCREEN_USAGE);
+    else if (next == 1)
+        ui_show_screen(SCREEN_CLOCK);
+    else
+    {
+        s_approval_view_idx = (uint8_t)(next - 2);
+        approval_refresh_labels();
+        ui_show_screen(SCREEN_APPROVAL);
+    }
+}
+
 void ui_update_ble_status(ble_state_t state, const char *name, const char *mac)
 {
     (void)name;
@@ -875,9 +1040,8 @@ void ui_update_ble_status(ble_state_t state, const char *name, const char *mac)
     if (!s_ble_connected && was_connected)
     {
         s_approval_count = 0;
-        s_approval_sid[0] = '\0';
-        s_pending_tool[0] = '\0';
-        s_pending_detail[0] = '\0';
+        s_approval_n = 0;
+        s_approval_view_idx = 0;
         apply_claude_state(); // leaves SCREEN_APPROVAL if we were on it
     }
 
