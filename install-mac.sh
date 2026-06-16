@@ -1,6 +1,7 @@
 #!/bin/bash
 # macOS installer for Clawdmeter daemon (Python + bleak + launchd).
 # Mirrors install.sh but uses LaunchAgents instead of systemd user units.
+# Entry point: python -m daemon (runs daemon/__main__.py, selects MacOSBackend).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,7 +9,6 @@ SERVICE_LABEL="com.user.claude-usage-daemon"
 PLIST_SRC="$SCRIPT_DIR/daemon/$SERVICE_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
-DAEMON_PY="$SCRIPT_DIR/daemon/claude_usage_daemon.py"
 LOG_DIR="$HOME/Library/Logs"
 LOG_OUT="$LOG_DIR/claude-usage-daemon.out.log"
 LOG_ERR="$LOG_DIR/claude-usage-daemon.err.log"
@@ -46,7 +46,6 @@ echo "[3/5] Rendering launchd plist..."
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 sed \
     -e "s|__PYTHON_BIN__|${PYTHON_BIN}|g" \
-    -e "s|__DAEMON_PATH__|${DAEMON_PY}|g" \
     -e "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
     -e "s|__LOG_OUT__|${LOG_OUT}|g" \
     -e "s|__LOG_ERR__|${LOG_ERR}|g" \
@@ -64,7 +63,7 @@ echo "  (or just continue) to enable launchd autostart."
 echo ""
 read -r -p "Run a permission-priming scan now? [Y/n] " ans
 if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-    "$PYTHON_BIN" "$DAEMON_PY" || true
+    ( cd "$SCRIPT_DIR" && "$PYTHON_BIN" -m daemon ) || true
 fi
 echo ""
 

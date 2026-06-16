@@ -42,7 +42,7 @@ before running the daemon:
 
 1. Put the device on its Bluetooth waiting screen (powered on, not yet connected).
 2. Open **Settings → Bluetooth & devices → Add device → Bluetooth**.
-3. Select **Claude Controller** and complete pairing.
+3. Select **Clawdmeter** and complete pairing.
 
 **Why this is required:**
 
@@ -93,18 +93,25 @@ This installs `bleak` (WinRT BLE) and `httpx` (async HTTP for the Anthropic API)
 
 ## Running the daemon
 
-With the venv active and the Clawdmeter powered on:
+With the venv active and the Clawdmeter powered on, run from the **repository root**:
 
 ```powershell
-python daemon\claude_usage_daemon_windows.py
+python -m daemon
 ```
+
+### What's new in this release
+
+- **Single entry point.** `python -m daemon` replaces the old `daemon\claude_usage_daemon_windows.py` direct invocation. The module auto-selects the correct backend (Windows → WinRT BLE, macOS → CoreBluetooth, Linux → BlueZ).
+- **Device name unified.** Windows now scans for `"Clawdmeter"` (was `"Claude Controller"` — a bug that prevented discovery on Windows). No user action needed; discovery now works correctly.
+- **Live Claude Code state.** Windows now receives the full live-state pipeline: working / idle / approval / question screens and the clock display. Requires Claude Code bash hooks installed (`daemon/install-hooks.sh` or the PowerShell equivalent). Without hooks the device shows usage bars only (falls back to `cs=3 NONE`).
+- **Reconnect timing.** The old 3-attempt connect retry + zombie-link break are replaced by the ping-keepalive + outer backoff model (same as macOS/Linux). Dead links are detected within one 5s TICK and reconnected within 1–60s backoff. This keeps well within the previous 120s SLA.
 
 ### Expected console output
 
 ```
-[HH:MM:SS] === Claude Usage Tracker Daemon (BLE, Windows) ===
+[HH:MM:SS] === Claude Usage Tracker Daemon (BLE) ===
 [HH:MM:SS] Poll interval: 60s
-[HH:MM:SS] Scanning for 'Claude Controller' (8.0s)...
+[HH:MM:SS] Scanning for 'Clawdmeter' (8.0s)...
 [HH:MM:SS] Found: XX:XX:XX:XX:XX:XX
 [HH:MM:SS] Connecting to XX:XX:XX:XX:XX:XX...
 [HH:MM:SS] Connected
@@ -135,7 +142,7 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `Warning: running under Linux/WSL` | Running in WSL, not native Windows | Run from a native PowerShell or Command Prompt on Windows |
-| `Scanning for 'Claude Controller'… Device not found` | Clawdmeter is off, out of range, or showing a non-Bluetooth screen | Power on the device and ensure it is on the Bluetooth waiting screen |
+| `Scanning for 'Clawdmeter'… Device not found` | Clawdmeter is off, out of range, or not yet paired | Power on the device and pair it via Bluetooth settings |
 | `No token; skipping poll` | No credentials file found at any candidate path | Confirm `claude login` ran on this machine; check `%USERPROFILE%\.claude\.credentials.json` exists |
 | `API HTTP 401` | Token expired | Re-run `claude login` in a terminal to refresh the token, then restart the daemon |
 | `Connection failed` | WinRT BLE initialisation issue | Ensure Windows Bluetooth is on; try toggling Bluetooth off/on in Windows Settings |

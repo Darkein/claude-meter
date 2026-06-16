@@ -8,7 +8,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>__PYTHON_BIN__</string>
-        <string>__DAEMON_PATH__</string>
+        <string>-m</string>
+        <string>daemon</string>
     </array>
 
     <key>WorkingDirectory</key>

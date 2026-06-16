@@ -1,9 +1,7 @@
 #!/bin/bash
 # Linux installer for the Clawdmeter daemon (Python + bleak + systemd user unit).
 # Mirrors install-mac.sh but uses a systemd --user service instead of launchd.
-# The Python daemon (daemon/claude_usage_daemon.py) is the only implementation:
-# it polls usage AND drives the live Claude Code state pipeline via the hook
-# state files. (The old bash daemon was usage-only and has been removed.)
+# Entry point: python -m daemon (runs daemon/__main__.py, selects LinuxBackend).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,7 +9,6 @@ SERVICE_NAME="claude-usage-daemon"
 SERVICE_FILE="$SCRIPT_DIR/daemon/$SERVICE_NAME.service"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
-DAEMON_PY="$SCRIPT_DIR/daemon/claude_usage_daemon.py"
 
 echo "=== Claude Usage Tracker - Install (Linux) ==="
 echo ""
@@ -39,9 +36,12 @@ echo ""
 
 echo "[3/4] Installing systemd user service..."
 mkdir -p "$USER_SERVICE_DIR"
-# Render ExecStart = <venv python> <daemon.py>. Use '#' as the sed delimiter so
-# absolute paths containing '/' don't need escaping.
-sed "s#DAEMON_PATH#${PYTHON_BIN} ${DAEMON_PY}#g" "$SERVICE_FILE" \
+# Render ExecStart = <venv python> -m daemon (cwd = repo root for package import).
+# Use '#' as the sed delimiter so absolute paths containing '/' don't need escaping.
+sed \
+    -e "s#EXEC_CMD#${PYTHON_BIN} -m daemon#g" \
+    -e "s#REPO_DIR#${SCRIPT_DIR}#g" \
+    "$SERVICE_FILE" \
     > "$USER_SERVICE_DIR/$SERVICE_NAME.service"
 systemctl --user daemon-reload
 

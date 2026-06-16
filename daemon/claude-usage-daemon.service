@@ -5,7 +5,8 @@ After=bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=DAEMON_PATH
+WorkingDirectory=REPO_DIR
+ExecStart=EXEC_CMD
 Restart=on-failure
 RestartSec=5
 

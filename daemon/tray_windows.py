@@ -7,8 +7,8 @@ Provides:
   main()      — tray entry: builds per-state icons, runs the daemon loop in a
                 bg thread, and runs pystray.Icon on the main thread
 
-The daemon loop (claude_usage_daemon_windows.main) is UNCHANGED in logic;
-this module injects only additive state-setter calls at existing branch points.
+The daemon loop (core.main + WindowsBackend) is driven from here;
+this module injects tray_state for status callbacks at existing branch points.
 
 Usage::
 

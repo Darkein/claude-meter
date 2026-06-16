@@ -1,5 +1,5 @@
-# Windows-only dependency manifest for claude_usage_daemon_windows.py
-# The macOS/Linux daemons manage their own dependencies separately.
+# Windows-only dependency manifest for the Clawdmeter daemon.
+# The macOS/Linux daemon uses requirements.txt.
 bleak
 httpx
 pystray
