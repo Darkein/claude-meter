@@ -4,6 +4,11 @@
 #include "hal/display_hal.h"
 #include "hal/power_hal.h"
 
+// True once the AMOLED controller has been put into sleep-in (panel powered
+// down, not just brightness 0). Gates the matching wake so we don't issue
+// redundant sleep-out commands (each carries ~240ms of settle delay).
+static bool panel_slept = false;
+
 enum IdleState {
     STATE_AWAKE,
     STATE_FADING_OUT,
@@ -24,6 +29,13 @@ static void apply_brightness(uint8_t b) {
 }
 
 static void begin_fade(uint8_t to, uint32_t now) {
+    // Waking: power the panel controller back on before the brightness ramp so
+    // the first non-zero step actually lights pixels. Sleep-out is ~240ms; it
+    // only runs on a genuine wake (callers gate begin_fade(awake) on asleep).
+    if (to != 0 && panel_slept) {
+        display_hal_wake();
+        panel_slept = false;
+    }
     fade_from = (to == 0) ? awake_brightness : 0;
     fade_to   = to;
     fade_started_ms = now;
@@ -118,7 +130,14 @@ void idle_tick(void) {
         uint32_t elapsed = now - fade_started_ms;
         if (elapsed >= dur) {
             apply_brightness(fade_to);
-            state = (state == STATE_FADING_OUT) ? STATE_ASLEEP : STATE_AWAKE;
+            if (state == STATE_FADING_OUT) {
+                state = STATE_ASLEEP;
+                // Brightness is already 0; now power the controller down too.
+                display_hal_sleep();
+                panel_slept = true;
+            } else {
+                state = STATE_AWAKE;
+            }
         } else {
             // Linear interpolation fade_from -> fade_to over dur ms.
             int32_t span = (int32_t)fade_to - (int32_t)fade_from;

@@ -11,6 +11,8 @@
 //   wr int    minutes until the 7d reset     -> weekly_reset_mins
 //   st str    "allowed" / "limited"          -> status
 //   ok bool   poll succeeded                 -> ok
+//   ec str    error code (auth/network/...)  -> (not stored; ok+em drive the UI)
+//   em str    device-displayable error msg   -> error_msg  (shown when ok=false)
 //   t  uint   local wall-clock epoch (sec)   -> host_epoch  (0/absent = no clock)
 //   cs int    claude_state (0..4, see below) -> claude_state
 //   aq int    approval queue length (total)  -> approval_count
@@ -48,7 +50,8 @@ struct UsageData {
     float weekly_pct;        // 7-day window utilization (0-100)
     int weekly_reset_mins;   // minutes until weekly resets
     char status[16];         // "allowed" or "limited"
-    bool ok;                 // data parse succeeded
+    bool ok;                 // poll succeeded (false => error_msg is set)
+    char error_msg[96];      // em — device-displayable error (empty when ok)
     bool valid;              // false until first successful parse
 
     uint32_t host_epoch;     // t — local wall-clock epoch from the host (0 = absent)

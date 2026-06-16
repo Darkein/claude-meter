@@ -50,6 +50,17 @@ void display_hal_fill_screen(uint16_t color) {
     if (gfx) gfx->fillScreen(color);
 }
 
+// Both SH8601 and CO5300 override displayOff/On to issue DISPOFF+SLPIN /
+// DISPON+SLPOUT with the panel's settle delays — powers the controller down,
+// not just brightness 0.
+void display_hal_sleep(void) {
+    if (gfx) gfx->displayOff();
+}
+
+void display_hal_wake(void) {
+    if (gfx) gfx->displayOn();
+}
+
 void display_hal_draw_bitmap(int32_t x, int32_t y, int32_t w, int32_t h,
                              const uint16_t* pixels) {
     if (gfx) gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pixels, w, h);

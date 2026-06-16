@@ -296,35 +296,43 @@ def test_missing_status_header_defaults_to_unknown(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test: poll_api returns None on HTTP >= 400
+# Test: poll_api surfaces catchable errors as an overlay payload (ok=False)
 # ---------------------------------------------------------------------------
 
-def test_poll_api_returns_none_on_4xx(monkeypatch):
-    """poll_api returns None when response status code is >= 400."""
-    mock_resp = _make_mock_response(status_code=429, headers={})
+def _poll(status_code, headers=None):
+    mock_resp = _make_mock_response(status_code=status_code, headers=headers or {})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.post = AsyncMock(return_value=mock_resp)
-
     with patch("httpx.AsyncClient", return_value=mock_client):
-        result = _run(poll_api("fake-token"))
-
-    assert result is None
+        return _run(poll_api("fake-token"))
 
 
-def test_poll_api_returns_none_on_5xx(monkeypatch):
-    """poll_api returns None when response status code is >= 500."""
-    mock_resp = _make_mock_response(status_code=500, headers={})
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=mock_resp)
+def test_poll_api_4xx_returns_raw_api_error(monkeypatch):
+    """A non-rate-limit 4xx (404 here) isn't self-explanatory, so poll_api returns
+    an error overlay carrying the raw message for the device to show verbatim.
+    429 is handled separately — it carries usable rate-limit headers."""
+    result = _poll(404)
+    assert result["ok"] is False
+    assert result["ec"] == "api"
+    assert "404" in result["em"]
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        result = _run(poll_api("fake-token"))
 
-    assert result is None
+def test_poll_api_5xx_returns_server_error(monkeypatch):
+    """A 5xx surfaces as a transient 'server' error overlay (not None, not auth)."""
+    result = _poll(500)
+    assert result["ok"] is False
+    assert result["ec"] == "server"
+    assert "500" in result["em"]
+
+
+def test_poll_api_529_returns_overloaded_error(monkeypatch):
+    """529 maps to its own 'overloaded' code with a retry-flavored message."""
+    result = _poll(529)
+    assert result["ok"] is False
+    assert result["ec"] == "overloaded"
+    assert "overloaded" in result["em"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +342,8 @@ def test_poll_api_returns_none_on_5xx(monkeypatch):
 @pytest.mark.parametrize("status", [401, 403])
 def test_poll_api_raises_autherror_on_401_403(status):
     """A real auth rejection must raise AuthError — the only signal that warrants
-    the actionable 'token expired — run claude login' toast. Transient failures
-    (5xx, 429, network) return None instead and must NOT trigger that toast."""
+    the actionable 'token expired — run claude login' toast. Other failures
+    (5xx, 429, network) return an error/usage payload instead and must NOT raise."""
     mock_resp = _make_mock_response(status_code=status, headers={})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -347,9 +355,11 @@ def test_poll_api_raises_autherror_on_401_403(status):
             _run(poll_api("fake-token"))
 
 
-def test_poll_api_returns_none_not_autherror_on_429(monkeypatch):
-    """Rate-limit (429) is transient — None, NOT AuthError (regression guard for
-    the 401/403-vs-other-4xx split)."""
+def test_poll_api_429_reports_saturation_not_autherror(monkeypatch):
+    """A 429 means the account hit a usage limit — report it (so the device shows
+    the cap) rather than raise AuthError or drop the update. With no usable
+    headers the 5h window is pinned to 100% and status to 'rejected'.
+    Regression guard for the 401/403-vs-other-4xx split."""
     mock_resp = _make_mock_response(status_code=429, headers={})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -359,15 +369,43 @@ def test_poll_api_returns_none_not_autherror_on_429(monkeypatch):
     with patch("httpx.AsyncClient", return_value=mock_client):
         result = _run(poll_api("fake-token"))
 
-    assert result is None
+    assert result is not None
+    assert result["s"] == 100
+    assert result["st"] == "rejected"
+    assert result["ok"] is True
+
+
+def test_poll_api_429_uses_rate_limit_headers_when_present(monkeypatch):
+    """When the 429 carries the unified headers, they win over the 100% fallback:
+    the 7d window keeps its real value and resets are parsed."""
+    headers = {
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+        "anthropic-ratelimit-unified-7d-utilization": "0.63",
+        "anthropic-ratelimit-unified-5h-status": "rejected",
+        "anthropic-ratelimit-unified-5h-reset": str(int(time.time()) + 3600),
+    }
+    mock_resp = _make_mock_response(status_code=429, headers=headers)
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = _run(poll_api("fake-token"))
+
+    assert result["s"] == 100
+    assert result["w"] == 63
+    assert result["sr"] == 60
+    assert result["st"] == "rejected"
 
 
 # ---------------------------------------------------------------------------
-# Test: poll_api returns None on httpx.HTTPError
+# Test: poll_api surfaces a network failure as a 'network' error overlay
 # ---------------------------------------------------------------------------
 
-def test_poll_api_returns_none_on_http_error(monkeypatch):
-    """poll_api returns None when httpx.HTTPError is raised (network failure)."""
+def test_poll_api_network_failure_returns_network_error(monkeypatch):
+    """A httpx.HTTPError (DNS/connect/timeout) surfaces as a 'network' overlay so
+    the device shows 'No connection' instead of silently going stale."""
     import httpx
 
     mock_client = AsyncMock()
@@ -378,7 +416,9 @@ def test_poll_api_returns_none_on_http_error(monkeypatch):
     with patch("httpx.AsyncClient", return_value=mock_client):
         result = _run(poll_api("fake-token"))
 
-    assert result is None
+    assert result["ok"] is False
+    assert result["ec"] == "network"
+    assert result["em"]
 
 
 # ---------------------------------------------------------------------------

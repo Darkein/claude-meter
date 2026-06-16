@@ -111,6 +111,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->weekly_reset_mins = doc["wr"] | -1;
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
+    strlcpy(out->error_msg, doc["em"] | "", sizeof(out->error_msg));
     out->host_epoch = doc["t"] | 0u;
 
     // Live Claude Code state (omitted on older daemons -> defaults to idle/no queue).
@@ -304,16 +305,28 @@ static void pair_tick(void) {
 
 void loop() {
     idle_tick();
-    lv_timer_handler();
-    ui_tick_anim();
+
+    // Battery saver: once the panel is asleep AND we're on battery (no USB),
+    // the device only needs to listen for BLE writes and button presses. Skip
+    // all the rendering/animation/sensor ticks that have nothing to do with a
+    // dark screen, and slow the loop from 200Hz to 10Hz so the CPU spends most
+    // of its time in vTaskDelay (and, with esp_pm, light-sleep). On USB or
+    // while awake, run the full-rate loop as before.
+    const bool battery_sleep = idle_is_asleep() && !power_hal_is_vbus_in();
+
+    if (!battery_sleep) {
+        lv_timer_handler();
+        ui_tick_anim();
+        audio_hal_tick();
+        imu_hal_tick();
+        // Rotation transition (blank + ramp) would fight the idle fade — skip
+        // ticks while the panel is dark. A rotation that happens during sleep
+        // is detected by the next tick after wake and ramped in then.
+        if (!idle_is_asleep()) display_hal_tick();
+    }
+
     ble_tick();
-    audio_hal_tick();
     power_hal_tick();
-    imu_hal_tick();
-    // Rotation transition (blank + ramp) would fight the idle fade — skip
-    // ticks while the panel is dark. A rotation that happens during sleep
-    // is detected by the next tick after wake and ramped in then.
-    if (!idle_is_asleep()) display_hal_tick();
 
     // ---- Physical buttons ----
     //   PRIMARY (BOOT)   → cycle brightness
@@ -379,5 +392,7 @@ void loop() {
         }
     }
 
-    delay(5);
+    // 10Hz when sleeping on battery (enough for BLE/button latency), 200Hz when
+    // awake for smooth UI. delay() maps to vTaskDelay, yielding to idle/light-sleep.
+    delay(battery_sleep ? 100 : 5);
 }

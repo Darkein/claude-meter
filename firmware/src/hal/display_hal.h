@@ -17,6 +17,14 @@ void display_hal_begin(void);
 void display_hal_set_brightness(uint8_t level);  // 0..255 (driver-defined scale)
 void display_hal_fill_screen(uint16_t color565);
 
+// Put the panel into / out of its controller low-power sleep (MIPI sleep-in
+// 0x10 + display-off 0x28, and the reverse on wake). This actually powers the
+// AMOLED controller down — distinct from brightness 0, which leaves it running.
+// Called by idle.cpp when the screen sleeps/wakes. wake() re-applies brightness
+// at the caller's next fade step.
+void display_hal_sleep(void);
+void display_hal_wake(void);
+
 // Write a w×h RGB565 bitmap at (x, y). Boards with software rotation
 // (e.g. CO5300) transform (x, y, w, h) and the pixel buffer here before
 // pushing to the panel. Shared LVGL flush_cb just calls this — no #ifdef.

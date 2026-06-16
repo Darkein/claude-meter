@@ -12,33 +12,38 @@
 # --permission-prompt-tool in non-interactive (-p) mode anyway. The native
 # Claude Code prompt stays the sole approver; the device only mirrors state.
 #
+# Each per-session state file carries TWO independent facts so they never clobber
+# each other (the daemon gives "dialog" priority over "activity"):
+#   activity : working | idle            — turn progress
+#   dialog   : none | waiting | asking   — pending UI (raises the device screen)
+#
 # Session-state event map (no blind spots):
-#   working  <- UserPromptSubmit, PreToolUse:* (except AskUserQuestion),
-#               PostToolUse, PostToolUseFailure,
-#               ElicitationResult (action=accept; state-elicit.sh)
-#   asking   <- PreToolUse:AskUserQuestion, Notification:elicitation_dialog
-#   waiting  <- PermissionRequest (every tool-permission dialog EXCEPT
-#               AskUserQuestion, which state-perm.sh skips; state-perm.sh)
-#   idle     <- Stop, StopFailure, Notification:idle_prompt,
-#               ElicitationResult (action=decline/cancel; state-elicit.sh routes
-#               to the idle delete-path so a dismissed elicitation clears the
-#               "asking" screen instead of flashing "working")
-#   (remove) <- SessionEnd
+#   activity=working <- UserPromptSubmit, PreToolUse:* (except AUQ/ExitPlanMode),
+#                       PostToolUse, PostToolUseFailure, ElicitationResult accept.
+#                       Also CLEARS dialog (a tool running / answer submitted = resolved).
+#   activity=idle    <- Stop, StopFailure, Notification:idle_prompt.
+#                       Sets activity ONLY — never clears an "asking" dialog (see below).
+#   dialog=asking    <- PreToolUse:AskUserQuestion (kind=question),
+#                       PreToolUse:ExitPlanMode (kind=plan),
+#                       Notification:elicitation_dialog (kind=elicitation)
+#   dialog=waiting   <- PermissionRequest (every tool-permission dialog EXCEPT
+#                       AUQ/ExitPlanMode, which state-perm.sh skips)
+#   dialog=none      <- ElicitationResult decline/cancel (explicit dismissal),
+#                       plus every activity=working event above.
+#   (remove file)    <- SessionEnd
 #
-# "waiting" clears the moment the permission is answered: a granted prompt fires
-# PreToolUse (before the tool executes) -> "working", so the device's approval
-# screen disappears at decision time rather than after the (possibly slow) tool
-# finishes. A denied permission runs no tool; Stop -> idle clears it instead.
-# "asking" clears when the user answers and the loop's next PreToolUse/PostToolUse
-# fires "working".
+# WHY a bare idle must NOT clear an "asking" dialog (the bug this fixes): opening
+# an AskUserQuestion/ExitPlanMode dialog PAUSES the turn, and Claude Code emits a
+# Stop/idle_prompt while the dialog is still open. The old design read that idle
+# as "dialog resolved" and deleted it, so the device showed "idle" for the whole
+# question. Now idle sets activity only; "asking" clears on the answer (PostToolUse
+# -> working), an explicit dismissal, SessionEnd, or the daemon's short dialog TTL.
 #
-# DIALOG CANCEL (ESC): pressing ESC to dismiss a permission OR AskUserQuestion
-# dialog fires no dedicated hook, but the session goes idle and emits Stop (a
-# mid-generation ESC) or, once the input prompt sits idle, Notification:idle_prompt.
-# Either way state-set.sh runs with "idle" and, seeing the prior state was
-# waiting/asking, DELETES the session file — so the device clears at that moment.
-# The daemon's DIALOG_STALE_S (~3min) prune is only the backstop for a session
-# that emits no such signal at all (e.g. crashed before going idle).
+# Asymmetry — idle DOES clear "waiting": a permission dialog being open emits no
+# Stop (verified), so an idle while dialog=waiting can only be a DENY/ESC with no
+# tool run — its legitimate clear signal. A granted permission instead fires
+# PostToolUse -> working. ESC-abandon of either dialog fires no hook; the daemon's
+# DIALOG_STALE_S TTL is the event-free backstop (a new prompt clears it instantly).
 #
 # PermissionRequest is used for permission dialogs instead of
 # Notification:permission_prompt because the Notification only fires when the OS
@@ -64,7 +69,9 @@ rm -f "$HOOK_DST"/state-working.sh "$HOOK_DST"/state-idle.sh "$HOOK_DST"/state-a
 
 WORK="$HOOK_DST/state-set.sh working"
 IDLE="$HOOK_DST/state-set.sh idle"
-ASK="$HOOK_DST/state-set.sh asking"
+ASK_Q="$HOOK_DST/state-set.sh asking question"
+ASK_PLAN="$HOOK_DST/state-set.sh asking plan"
+ASK_ELICIT="$HOOK_DST/state-set.sh asking elicitation"
 PERM="$HOOK_DST/state-perm.sh"
 PRETOOL="$HOOK_DST/state-pretool.sh"
 ELICIT="$HOOK_DST/state-elicit.sh"
@@ -79,13 +86,15 @@ echo "  Backed up settings.json -> $SETTINGS.clawdmeter.bak"
 # script paths) from a group, leaving third-party hooks (e.g. sound) untouched,
 # then we re-add our entries. clean() drops a now-empty event group entirely.
 jq \
-  --arg work "$WORK" --arg idle "$IDLE" --arg ask "$ASK" --arg perm "$PERM" \
+  --arg work "$WORK" --arg idle "$IDLE" --arg perm "$PERM" \
+  --arg ask_q "$ASK_Q" --arg ask_plan "$ASK_PLAN" --arg ask_elicit "$ASK_ELICIT" \
   --arg pretool "$PRETOOL" --arg elicit "$ELICIT" --arg end "$END" \
   --arg legacy_dir "$HOOK_DST" \
   '
   # true if a hook command is one of ours (current args or any legacy script)
   def is_ours($cmd):
-    ($cmd == $work) or ($cmd == $idle) or ($cmd == $ask) or ($cmd == $perm)
+    ($cmd == $work) or ($cmd == $idle) or ($cmd == $perm)
+    or ($cmd == $ask_q) or ($cmd == $ask_plan) or ($cmd == $ask_elicit)
     or ($cmd == $pretool) or ($cmd == $elicit) or ($cmd == $end)
     or ($cmd | test("/state-(working|idle|approve|set|waiting|perm|pretool|elicit|end)\\.sh"));
 
@@ -97,18 +106,18 @@ jq \
     if (.hooks[$k] | length // 0) == 0 then del(.hooks[$k]) else . end;
 
   # PreToolUse: NO approval gate (display-only). Strip any prior entry, then add:
-  #   - AskUserQuestion -> "asking" (built-in question tool blocking for a choice)
-  #   - ExitPlanMode    -> "asking" (plan-approval prompt: blocks for a user choice
-  #                        just like a question. Mapped to cs=4 so it appears on the
-  #                        device IMMEDIATELY — the "waiting" path is gated by a
-  #                        2-read stability check + poll cadence and took ~30s.)
-  #   - *              -> "working" (fires right after a permission is granted,
-  #                        before the tool runs; clears the device "waiting" screen
-  #                        at decision time. state-pretool.sh skips AskUserQuestion
-  #                        and ExitPlanMode so it does not clobber the matchers above.)
+  #   - AskUserQuestion -> dialog=asking, kind=question (blocked on a choice)
+  #   - ExitPlanMode    -> dialog=asking, kind=plan (plan-approval prompt; kind lets
+  #                        the device show "Approve plan?" vs "Claude is asking").
+  #                        asking is reported immediately by the daemon (no stability
+  #                        gate — it is never a transient auto-grant).
+  #   - *              -> activity=working (a tool is starting; PreToolUse fires
+  #                        BEFORE the permission dialog, so this just marks work and
+  #                        clears a stale dialog. state-pretool.sh skips
+  #                        AskUserQuestion/ExitPlanMode so it never clobbers asking.)
   .hooks.PreToolUse = ((.hooks.PreToolUse // []) | strip)
-    + [ {matcher:"AskUserQuestion", hooks:[ {type:"command", command:$ask} ]} ]
-    + [ {matcher:"ExitPlanMode",    hooks:[ {type:"command", command:$ask} ]} ]
+    + [ {matcher:"AskUserQuestion", hooks:[ {type:"command", command:$ask_q} ]} ]
+    + [ {matcher:"ExitPlanMode",    hooks:[ {type:"command", command:$ask_plan} ]} ]
     + [ {matcher:"*",               hooks:[ {type:"command", command:$pretool} ]} ]
 
   # PermissionRequest fires for EVERY tool permission dialog, focused or not
@@ -141,7 +150,7 @@ jq \
   # through PermissionRequest (above), which fires reliably regardless of focus.
   | .hooks.Notification = ((.hooks.Notification // []) | strip)
     + [ {matcher:"idle_prompt",        hooks:[ {type:"command", command:$idle} ]} ]
-    + [ {matcher:"elicitation_dialog", hooks:[ {type:"command", command:$ask} ]} ]
+    + [ {matcher:"elicitation_dialog", hooks:[ {type:"command", command:$ask_elicit} ]} ]
 
   # --- cleanup ---
   | .hooks.SessionEnd = ((.hooks.SessionEnd // []) | strip)

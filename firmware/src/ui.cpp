@@ -116,6 +116,8 @@ static void compute_layout(const BoardCaps &c)
 static lv_obj_t *usage_container;
 static lv_obj_t *lbl_title;
 static lv_obj_t *usage_group; // the two usage panels — shown when connected
+static lv_obj_t *error_group;       // API-error message — shown when the daemon reports !ok
+static lv_obj_t *lbl_error;         // the wrapped error text inside error_group
 static lv_obj_t *pair_group;        // pairing hint — shown when disconnected
 static lv_obj_t *pair_title;        // title label — "Waiting for host" vs "Pairing…"
 static lv_obj_t *bar_session;
@@ -167,6 +169,10 @@ static uint8_t s_approval_n = 0;                 // entries filled in s_approval
 static uint8_t s_approval_view_idx = 0;          // which approval the screen shows
 static uint32_t s_idle_since_ms = 0; // when CLAUDE_IDLE was entered ("Finished!" 10s window)
 #define IDLE_FINISHED_MS 10000
+
+// ---- Cached API-error state (from ui_update, daemon's ok/em fields) ----
+static bool s_error_active = false;       // daemon reported a catchable API error
+static char s_error_msg[96] = "";         // em — device-displayable message
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
@@ -488,6 +494,35 @@ static void build_idle_group(lv_obj_t *parent)
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN); // update_view_state decides
 }
 
+// API-error screen — shown when the daemon reports a catchable failure (not
+// logged in, no internet, API down…). Full-screen like the pairing/idle hints,
+// so we never paint stale numbers as if they were live. The wrapped message
+// comes straight from the daemon (`em`), so new error kinds need no firmware
+// change — they just display.
+static void build_error_group(lv_obj_t *parent)
+{
+    error_group = lv_obj_create(parent);
+    lv_obj_set_size(error_group, L.scr_w, L.scr_h - L.content_y);
+    lv_obj_set_pos(error_group, 0, L.content_y);
+    lv_obj_set_style_bg_opa(error_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(error_group, 0, 0);
+    lv_obj_set_style_pad_all(error_group, 0, 0);
+    lv_obj_clear_flag(error_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(error_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(error_group, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    lbl_error = lv_label_create(error_group);
+    lv_label_set_long_mode(lbl_error, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_error, L.scr_w - 80); // margin clears the rounded corners
+    lv_obj_set_style_text_align(lbl_error, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_error, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(lbl_error, COL_AMBER, 0);
+    lv_label_set_text(lbl_error, "");
+    lv_obj_align(lbl_error, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_add_flag(error_group, LV_OBJ_FLAG_HIDDEN); // update_view_state decides
+}
+
 static void init_usage_screen(lv_obj_t *scr)
 {
     usage_container = lv_obj_create(scr);
@@ -527,6 +562,7 @@ static void init_usage_screen(lv_obj_t *scr)
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
+    build_error_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
@@ -672,13 +708,15 @@ static void approval_refresh_labels(void)
     const char *tool = a ? a->tool : "";
     const char *detail = a ? a->detail : "";
 
-    // The daemon sends the raw tool_name (e.g. "Bash", "Write", or
-    // "AskUserQuestion"). AskUserQuestion isn't a permission prompt — it's
-    // Claude asking the user a question — so show natural wording for it and
-    // keep the real tool name otherwise.
+    // The daemon sends the raw trigger as tool_name. AskUserQuestion and
+    // ExitPlanMode aren't permission prompts — they block on a user choice /
+    // plan approval — so show natural wording for each and keep the real tool
+    // name otherwise.
     bool is_question = (strcmp(tool, "AskUserQuestion") == 0);
-    const char *title = is_question ? "Claude is asking"
-                                    : (tool[0] ? tool : "Tool");
+    bool is_plan = (strcmp(tool, "ExitPlanMode") == 0);
+    const char *title = is_plan     ? "Approve plan?"
+                        : is_question ? "Claude is asking"
+                                      : (tool[0] ? tool : "Tool");
     lv_label_set_text(lbl_approval_tool, title);
     lv_label_set_text(lbl_approval_detail, detail);
 
@@ -692,7 +730,8 @@ static void approval_refresh_labels(void)
     if (s_approval_count > 1)
         lv_label_set_text_fmt(lbl_approval_count, "Permission  %d / %d", pos, s_approval_count);
     else
-        lv_label_set_text(lbl_approval_count, is_question ? "Question" : "Permission");
+        lv_label_set_text(lbl_approval_count,
+                          is_plan ? "Plan" : is_question ? "Question" : "Permission");
 }
 
 // ======== Public API ========
@@ -802,8 +841,22 @@ void ui_update(const UsageData *data)
         s_approvals[i] = data->approvals[i];
     apply_claude_state();
 
-    last_data_ms = lv_tick_get(); // a valid usage update just landed → dot goes green
+    last_data_ms = lv_tick_get(); // a valid update just landed → dot goes green
     data_received = true;
+
+    // API-error overlay: when the daemon reports !ok with a message, latch it so
+    // update_view_state() can swap in the error screen. A subsequent ok=true
+    // update clears it and the usage bars return.
+    bool err = !data->ok && data->error_msg[0] != '\0';
+    if (err)
+        strlcpy(s_error_msg, data->error_msg, sizeof(s_error_msg));
+    if (err != s_error_active ||
+        (err && lbl_error && strcmp(lv_label_get_text(lbl_error), s_error_msg) != 0))
+    {
+        s_error_active = err;
+        if (err && lbl_error)
+            lv_label_set_text(lbl_error, s_error_msg);
+    }
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
@@ -833,11 +886,16 @@ static void update_view_state(void)
     if (!usage_group || !pair_group || !idle_group)
         return;
     int v;
+    bool fresh = data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS;
     if (!s_ble_connected)
     {
         v = 0; // pairing hint
     }
-    else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS)
+    else if (fresh && s_error_active)
+    {
+        v = 3; // API error (not logged in, offline, API down…)
+    }
+    else if (fresh)
     {
         v = 2; // live usage
     }
@@ -866,9 +924,22 @@ static void update_view_state(void)
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group
-                                                   : usage_group,
-                      LV_OBJ_FLAG_HIDDEN);
+    if (error_group)
+        lv_obj_add_flag(error_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *shown = v == 0 ? pair_group : v == 1 ? idle_group
+                            : v == 3 ? error_group
+                                     : usage_group;
+    if (shown)
+        lv_obj_clear_flag(shown, LV_OBJ_FLAG_HIDDEN);
+    // The bottom status line is noise under a full error message — hide it on
+    // the error view, restore it everywhere else.
+    if (lbl_anim)
+    {
+        if (v == 3)
+            lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_tick_anim(void)

@@ -41,6 +41,17 @@ void display_hal_fill_screen(uint16_t color) {
     if (gfx) gfx->fillScreen(color);
 }
 
+// displayOff/On already issue DISPOFF+SLPIN / DISPON+SLPOUT with the panel's
+// required settle delays, powering the controller down rather than just zeroing
+// brightness.
+void display_hal_sleep(void) {
+    if (gfx) gfx->displayOff();
+}
+
+void display_hal_wake(void) {
+    if (gfx) gfx->displayOn();
+}
+
 // Rotate a w×h strip into rot_buf and compute destination coordinates on the
 // 480×480 panel. Src is row-major over the rectangle (sx, sy, w, h).
 static void rotate_strip(const uint16_t* src, int32_t w, int32_t h,

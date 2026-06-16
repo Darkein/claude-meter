@@ -38,9 +38,11 @@ SCAN_TIMEOUT = 8.0
 # Live Claude Code state: hooks write per-session files here; the daemon watches
 # the dir and translates them into the BLE payload. See daemon/hooks/.
 STATE_DIR = Path.home() / ".config" / "claude-usage-monitor" / "state"
-STATE_STALE_S = 120       # a working/idle file older than this is ignored (crashed session).
-DIALOG_MIN_AGE_S = 2.5    # ignore a waiting/asking file YOUNGER than this.
-DIALOG_STALE_S = 600      # delete a waiting/asking file older than this.
+STATE_STALE_S = 120       # an activity value (working/idle) older than this is ignored (crashed session).
+DIALOG_MIN_AGE_S = 2.5    # a "waiting" dialog must be this old before it counts (debounce auto-grants).
+DIALOG_STALE_S = 45       # a dialog (waiting/asking) older than this is ignored. No hook fires on
+                          # ESC-abandon, so this short TTL is the only event-free clear; a new prompt
+                          # clears it instantly via "working".
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -121,7 +123,32 @@ def _extract_access_token(blob: str) -> str | None:
 # API polling
 # ---------------------------------------------------------------------------
 
-async def poll_api(token: str) -> dict | None:
+# Error payloads carry ok=False plus ec (machine code) + em (short, device-
+# displayable message). The device shows `em` verbatim on an error screen; the
+# daemon keeps the last good usage numbers underneath so they reappear on
+# recovery. Keep em short — it shares the 512-byte BLE RX buffer.
+EM_MAX = 90
+
+
+def _error_payload(ec: str, em: str) -> dict:
+    return {"ok": False, "ec": ec, "em": em[:EM_MAX]}
+
+
+def _api_error_message(resp) -> str:
+    """Best-effort human message from an Anthropic error body, else raw text."""
+    try:
+        m = resp.json().get("error", {}).get("message")
+        if isinstance(m, str) and m.strip():
+            return m.strip()
+    except (ValueError, AttributeError):
+        pass
+    return (resp.text or "").strip()
+
+
+async def poll_api(token: str) -> dict:
+    """Poll the API and return a payload dict — usage (ok=True) on success, or an
+    error overlay (ok=False, ec, em) on a catchable failure. Raises AuthError on
+    a genuine 401/403 so the caller can drive the 'run claude login' tray toast."""
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
@@ -129,16 +156,29 @@ async def poll_api(token: str) -> dict | None:
             resp = await http.post(API_URL, headers=headers, json=API_BODY)
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
-        return None
+        return _error_payload("network", "No connection to\nAnthropic API")
     if resp.status_code in (401, 403):
         # The token is re-read from Keychain/credentials on every poll, so an
         # expired token self-heals the moment you re-login to Claude Code.
         log(f"API HTTP {resp.status_code}: auth failed — token likely expired; "
             f"re-login to Claude Code (the daemon picks up the new token on the next poll)")
         raise AuthError(resp.status_code)
-    if resp.status_code >= 400:
-        log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+    # A 429 means the account hit a usage limit — but the response still
+    # carries the anthropic-ratelimit-unified-* headers (the rejected window
+    # reports ~100% plus a -reset countdown), so we parse it like a 200 below
+    # instead of dropping the update. Only genuinely unusable statuses bail.
+    rate_limited = resp.status_code == 429
+    if resp.status_code >= 400 and not rate_limited:
+        code = resp.status_code
+        log(f"API HTTP {code}: {resp.text[:200]}")
+        if code == 529:
+            return _error_payload("overloaded", "Anthropic API overloaded\nRetrying…")
+        if code >= 500:
+            return _error_payload("server", f"Anthropic API error {code}\nRetrying…")
+        # Other 4xx (400/404/413/...) aren't self-explanatory — surface the raw
+        # API message so the user sees exactly what went wrong.
+        msg = _api_error_message(resp)
+        return _error_payload("api", f"API error {code}\n{msg}" if msg else f"API error {code}")
 
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)
@@ -163,12 +203,26 @@ async def poll_api(token: str) -> dict | None:
     lt = time.localtime()
     wall_epoch = int(time.mktime(lt)) + lt.tm_gmtoff
 
+    s = pct(hdr("anthropic-ratelimit-unified-5h-utilization"))
+    w = pct(hdr("anthropic-ratelimit-unified-7d-utilization"))
+    st = hdr("anthropic-ratelimit-unified-5h-status", "unknown")
+
+    if rate_limited:
+        # The account is provably saturated. The 429 usually still includes
+        # the unified headers, but if a header is absent (some 429s omit them)
+        # pin the 5h window to 100% so the device shows the cap, not a stale 0.
+        if s == 0:
+            s = 100
+        if st == "unknown":
+            st = "rejected"
+        log(f"API HTTP 429: rate-limited — reporting 5h={s}% 7d={w}%")
+
     payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
+        "s": s,
         "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
+        "w": w,
         "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
+        "st": st,
         "ok": True,
         "t": wall_epoch,
     }
@@ -184,8 +238,20 @@ WAITING_STABLE_READS = 2
 MAX_Q = 4
 
 
+# Map an "asking" dialog kind to the tool name the firmware keys its wording on
+# (AskUserQuestion -> "Claude is asking", ExitPlanMode -> "Approve plan?").
+_ASK_KIND_TO_TOOL = {"plan": "ExitPlanMode", "question": "AskUserQuestion",
+                     "elicitation": "AskUserQuestion"}
+
+
 def _claude_state_fields() -> dict:
     """Read STATE_DIR and return the live-state payload fields.
+
+    Each per-session file carries two independent facts (see daemon/hooks/):
+      activity : "working" | "idle"      — turn progress (with activity_ts)
+      dialog   : "none" | "waiting" | "asking"  — pending UI (with dialog_ts);
+                 takes priority over activity so a turn-pause idle can never
+                 hide an open dialog.
 
     Returns {"cs", "aq", "q", "_queue"} where:
       cs  = 0 idle / 1 working / 2 permission prompt pending /
@@ -195,11 +261,12 @@ def _claude_state_fields() -> dict:
       _queue = list of waiting sids (internal-only; stripped before BLE send)
     """
     now = time.time()
-    activity = 3          # NONE until a fresh working/idle file is seen
-    activity_ts = -1.0
-    asking = False
+    any_working = False   # any fresh session is making progress
+    any_idle = False      # any fresh session is paused/finished
+    asking_kind: str | None = None   # kind of the most-recent fresh "asking"
+    asking_ts = -1.0
     waiting: list[tuple[float, str, str, str]] = []
-    live_sids: set[str] = set()
+    live_waiting_sids: set[str] = set()
 
     try:
         files = list(STATE_DIR.glob("*.json"))
@@ -211,49 +278,61 @@ def _claude_state_fields() -> dict:
             d = json.loads(f.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        st = d.get("state")
-        ts = float(d.get("ts", 0))
         sid = d.get("sid") or f.stem
-        if st == "waiting":
-            live_sids.add(sid)
-            if now - ts > DIALOG_STALE_S:
-                f.unlink(missing_ok=True)
-                continue
-            if now - ts < DIALOG_MIN_AGE_S:
-                continue
-            prev_ts, seen = _waiting_seen.get(sid, (0.0, 0))
-            if ts != prev_ts:
-                _waiting_seen[sid] = (ts, 1)
-                if ts > activity_ts:
-                    activity_ts = ts
-                    activity = 1
-                continue
-            seen += 1
-            _waiting_seen[sid] = (ts, seen)
-            if seen < WAITING_STABLE_READS:
-                if ts > activity_ts:
-                    activity_ts = ts
-                    activity = 1
-                continue
-            waiting.append((ts, sid, str(d.get("tool", ""))[:15],
-                            str(d.get("detail", ""))[:60]))
-        elif st == "asking":
-            if now - ts > DIALOG_STALE_S:
-                f.unlink(missing_ok=True)
-                continue
-            if now - ts < DIALOG_MIN_AGE_S:
-                continue
-            asking = True
-        else:  # working / idle
-            if now - ts > STATE_STALE_S:
-                continue
-            cand = 1 if st == "working" else 0
-            if ts > activity_ts or (ts == activity_ts and cand > activity):
-                activity_ts = ts
-                activity = cand
+        dialog = d.get("dialog", "none")
+        dialog_ts = float(d.get("dialog_ts", 0))
+        act = d.get("activity")
+        act_ts = float(d.get("activity_ts", 0))
 
-    for dead in [s for s in _waiting_seen if s not in live_sids]:
+        dialog_fresh = dialog in ("waiting", "asking") and now - dialog_ts <= DIALOG_STALE_S
+        activity_fresh = act in ("working", "idle") and now - act_ts <= STATE_STALE_S
+        if not dialog_fresh and not activity_fresh:
+            # Nothing fresh left (finished long ago / crashed before SessionEnd,
+            # or a pre-upgrade single-field file). Drop it so the dir stays clean.
+            f.unlink(missing_ok=True)
+            continue
+
+        # --- dialog (waiting/asking) takes priority over activity ---
+        if dialog == "waiting" and now - dialog_ts <= DIALOG_STALE_S:
+            live_waiting_sids.add(sid)
+            if now - dialog_ts >= DIALOG_MIN_AGE_S:
+                # Stability gate: a real blocked prompt holds a steady dialog_ts
+                # across reads; an acceptEdits auto-grant stream keeps advancing
+                # it and so never reaches the threshold (treated as working via
+                # its activity field).
+                prev_ts, seen = _waiting_seen.get(sid, (0.0, 0))
+                if dialog_ts != prev_ts:
+                    _waiting_seen[sid] = (dialog_ts, 1)
+                else:
+                    seen += 1
+                    _waiting_seen[sid] = (dialog_ts, seen)
+                    if seen >= WAITING_STABLE_READS:
+                        waiting.append((dialog_ts, sid,
+                                        str(d.get("tool", ""))[:15],
+                                        str(d.get("detail", ""))[:60]))
+        elif dialog == "asking" and now - dialog_ts <= DIALOG_STALE_S:
+            if dialog_ts > asking_ts:
+                asking_ts = dialog_ts
+                asking_kind = str(d.get("kind") or "question")
+
+        # --- activity (fallback when no dialog wins) ---
+        # Working dominates idle across concurrent sessions: the aggregate is
+        # "working" if ANY fresh session is working, and only "idle" once they
+        # have ALL gone idle. (Previously the most-recent activity_ts won, so a
+        # session ending with a fresh idle masked another still-working session
+        # -> a premature "finished" on the first end and none on the last.) A
+        # hung/crashed working session is dropped by activity_fresh after
+        # STATE_STALE_S, so it can't pin the aggregate to working forever.
+        if activity_fresh:
+            if act == "working":
+                any_working = True
+            else:
+                any_idle = True
+
+    for dead in [s for s in _waiting_seen if s not in live_waiting_sids]:
         del _waiting_seen[dead]
+
+    activity = 1 if any_working else (0 if any_idle else 3)
 
     waiting.sort(key=lambda x: x[0])
     if waiting:
@@ -265,9 +344,9 @@ def _claude_state_fields() -> dict:
             "q": q,
             "_queue": [w[1] for w in waiting],
         }
-    if asking:
-        return {"cs": 4, "aq": 1,
-                "q": [{"tn": "AskUserQuestion", "td": ""}], "_queue": []}
+    if asking_kind is not None:
+        tn = _ASK_KIND_TO_TOOL.get(asking_kind, "AskUserQuestion")
+        return {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": ""}], "_queue": []}
     return {"cs": activity, "aq": 0, "q": [], "_queue": []}
 
 
@@ -354,9 +433,13 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
     session = Session(client)
     await session.setup_refresh_subscription()
 
-    last_usage: dict = {}
+    last_usage: dict = {}     # last successful usage payload (ok=True)
+    last_error: dict = {}      # current error overlay (ok=False, ec, em) or {} when healthy
     last_pushed: str | None = None
     used = {"ok": False}
+
+    # Pre-baked auth overlay — used for both a missing token and a 401/403.
+    auth_error = _error_payload("auth", "Not logged in\nRun: claude login")
 
     session_stop = asyncio.Event()
 
@@ -366,11 +449,13 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
 
     async def push() -> None:
         nonlocal last_pushed
-        if not last_usage:
+        if not last_usage and not last_error:
             return
         state = _claude_state_fields()
         state.pop("_queue", None)
-        merged = {**last_usage, **state}
+        # last_error wins over last_usage (its ok=False + em override the stale
+        # numbers), so the device shows the error while keeping the bars beneath.
+        merged = {**last_usage, **last_error, **state}
         blob = json.dumps(merged, separators=(",", ":"))
         if blob == last_pushed:
             return
@@ -389,20 +474,36 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
                 token = backend.read_token()
                 if not token:
                     log("No token; skipping poll")
+                    last_error.clear()
+                    last_error.update(auth_error)
                     if tray_state is not None:
                         tray_state.set_error("token expired — run claude login")
                 else:
                     try:
                         payload = await poll_api(token)
                     except AuthError:
+                        last_error.clear()
+                        last_error.update(auth_error)
                         if tray_state is not None:
                             tray_state.set_error("token expired — run claude login")
-                        payload = None
-                    if payload is not None:
-                        last_usage.clear()
-                        last_usage.update(payload)
-                        last_poll = time.time()
-                        await push()
+                    else:
+                        # poll_api now always returns a dict: a usage payload
+                        # (ok=True) or an error overlay (ok=False, ec, em).
+                        if payload.get("ok"):
+                            last_usage.clear()
+                            last_usage.update(payload)
+                            last_error.clear()
+                        else:
+                            last_error.clear()
+                            last_error.update(payload)
+                last_poll = time.time()
+            # Re-evaluate live Claude state every tick, not just on poll. The
+            # waiting-dialog stability gate needs repeated reads to mature, and
+            # a lone permission prompt fires no further file-change events for
+            # watch_loop to ride on — so without this a single prompt would sit
+            # invisible until it went stale. Cheap: push() no-ops when the
+            # serialized payload is unchanged.
+            await push()
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
             except asyncio.TimeoutError:
