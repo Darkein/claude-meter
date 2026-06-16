@@ -25,6 +25,7 @@ from watchfiles import awatch
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
+TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"  # readable; used as link-liveness probe
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 POLL_INTERVAL = 60
@@ -498,7 +499,14 @@ def _claude_state_fields() -> dict:
             "_queue": [w[1] for w in waiting],
         }
     if asking:
-        return {"cs": 4, "aq": 0, "q": [], "_queue": []}
+        # Send a synthetic queue entry so the firmware raises its dedicated
+        # screen: apply_claude_state() only switches to SCREEN_APPROVAL when
+        # aq > 0, and approval_refresh_labels() shows "Claude is asking" /
+        # "Question" when the tool name is "AskUserQuestion". cs=4 still drives
+        # the status text + attention chime. No sid/detail (the hook records
+        # neither for a question); empty td -> firmware centers the title.
+        return {"cs": 4, "aq": 1,
+                "q": [{"tn": "AskUserQuestion", "td": ""}], "_queue": []}
     return {"cs": activity, "aq": 0, "q": [], "_queue": []}
 
 
@@ -516,6 +524,21 @@ class Session:
             await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
         except (BleakError, ValueError) as e:
             log(f"Refresh subscription unavailable: {e}")
+
+    async def ping(self) -> bool:
+        """Probe the link with a confirmed GATT read. macOS keeps a suspended
+        connection looking alive during sleep (is_connected stays True, writes
+        with response=False don't raise), so the daemon never reconnects on
+        wake and the device sits on 'Waiting for host'. A response-bearing read
+        forces the dead link to surface as a BleakError, so connect_and_run
+        returns and the outer loop reconnects → device flips back to CONNECTED.
+        """
+        try:
+            await self.client.read_gatt_char(TX_CHAR_UUID)
+            return True
+        except (BleakError, asyncio.TimeoutError, EOFError) as e:
+            log(f"Keepalive ping failed (link dead): {e}")
+            return False
 
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
@@ -560,6 +583,16 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     last_pushed: str | None = None
     used = {"ok": False}
 
+    # Set when this session must end: either the daemon is shutting down
+    # (global stop_event) or the link went dead (keepalive ping failed).
+    # awatch and both loops watch this so a dead link tears the whole session
+    # down promptly and the outer loop reconnects.
+    session_stop = asyncio.Event()
+
+    async def forward_global_stop() -> None:
+        await stop_event.wait()
+        session_stop.set()
+
     async def push() -> None:
         nonlocal last_pushed
         if not last_usage:
@@ -576,7 +609,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
 
     async def poll_loop() -> None:
         last_poll = 0.0
-        while client.is_connected and not stop_event.is_set():
+        while client.is_connected and not session_stop.is_set():
             elapsed = time.time() - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
@@ -593,23 +626,30 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
             except asyncio.TimeoutError:
-                pass
+                # Idle tick: probe the link so a Mac-sleep-suspended connection
+                # is detected promptly. On failure, drop out so connect_and_run
+                # returns and the outer loop reconnects (device → CONNECTED).
+                if not await session.ping():
+                    session_stop.set()
+                    break
 
     async def watch_loop() -> None:
         # Push once immediately (covers state files that already exist on connect),
         # then on every change to the state dir.
         await push()
         try:
-            async for _ in awatch(STATE_DIR, stop_event=stop_event):
-                if not client.is_connected:
+            async for _ in awatch(STATE_DIR, stop_event=session_stop):
+                if not client.is_connected or session_stop.is_set():
                     break
                 await push()
         except RuntimeError:
             pass  # awatch can raise if the dir vanishes; poll_loop keeps us alive
 
+    forwarder = asyncio.ensure_future(forward_global_stop())
     try:
         await asyncio.gather(poll_loop(), watch_loop())
     finally:
+        forwarder.cancel()
         try:
             await client.disconnect()
         except BleakError:
