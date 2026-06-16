@@ -98,6 +98,17 @@ def _read_expiry() -> str:
     return "expiry unknown"
 
 
+def read_token() -> str | None:
+    """Module-level convenience: read the Claude OAuth access token.
+    Delegates to WindowsBackend logic without requiring an instance."""
+    for path in _windows_credential_candidates():
+        try:
+            return core._extract_access_token(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return None
+
+
 class WindowsBackend(Backend):
     name = "windows"
 

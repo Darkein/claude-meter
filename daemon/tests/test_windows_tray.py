@@ -110,22 +110,26 @@ def test_header_text_connected_never_when_last_sync_none():
 # ---------------------------------------------------------------------------
 
 def test_main_populates_tray_state_loop_and_stop_event():
-    """daemon main(tray_state=ts) sets ts.loop and ts.stop_event before the loop body."""
-    import daemon.claude_usage_daemon_windows as mod
+    """daemon core.main(backend, tray_state=ts) sets ts.loop and ts.stop_event."""
+    import daemon.core as mod
+    from daemon.backends.windows import WindowsBackend
 
     ts = TrayState()
     populated = {}
 
-    async def _fake_scan():
-        # Record the state of ts at first scan entry (after main() startup lines).
+    async def _fake_discover(skip_addr=None):
+        # Record the state of ts at first discover entry (after main() startup lines).
         populated["loop"] = ts.loop
         populated["stop_event"] = ts.stop_event
         # Signal stop so the loop exits cleanly.
         ts.stop_event.set()
         return None   # no device found
 
-    with patch.object(mod, "scan_for_device", side_effect=_fake_scan):
-        asyncio.run(mod.main(tray_state=ts))
+    backend = MagicMock(spec=WindowsBackend)
+    backend.single_instance.return_value = object()
+    backend.discover_target = AsyncMock(side_effect=_fake_discover)
+
+    asyncio.run(mod.main(backend, tray_state=ts))
 
     assert populated.get("loop") is not None, "ts.loop must be set by daemon main()"
     assert populated.get("stop_event") is not None, "ts.stop_event must be set by daemon main()"
@@ -302,21 +306,25 @@ def test_repo_root_on_sys_path_after_import():
 # main() must guard signal setup to the main thread; the tray owns shutdown.
 
 def test_main_runs_in_background_thread_without_signal_error():
-    """main(tray_state=ts) started from a non-main thread must not raise on signal setup."""
+    """core.main(backend, tray_state=ts) from non-main thread must not raise on signal setup."""
     import threading as _threading
-    import daemon.claude_usage_daemon_windows as mod
+    import daemon.core as mod
+    from daemon.backends.windows import WindowsBackend
 
     ts = TrayState()
     errors: list = []
 
-    async def _fake_scan():
+    async def _fake_discover(skip_addr=None):
         ts.stop_event.set()   # exit the loop immediately
         return None
 
+    backend = MagicMock(spec=WindowsBackend)
+    backend.single_instance.return_value = object()
+    backend.discover_target = AsyncMock(side_effect=_fake_discover)
+
     def _run() -> None:
         try:
-            with patch.object(mod, "scan_for_device", side_effect=_fake_scan):
-                asyncio.run(mod.main(tray_state=ts))
+            asyncio.run(mod.main(backend, tray_state=ts))
         except Exception as exc:   # noqa: BLE001 — capture for the assertion
             errors.append(exc)
 

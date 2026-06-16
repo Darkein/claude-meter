@@ -15,17 +15,30 @@ from pathlib import Path
 # The four WSL-path patterns that must never appear in the daemon sources.
 FORBIDDEN = [r"\\wsl\$", r"wsl\.exe", r"/home/", r"/mnt/"]
 
-# The three Windows-daemon source files covered by the guard.
+# The daemon source files covered by the guard.
 SOURCES = [
-    Path("daemon/claude_usage_daemon_windows.py"),
+    Path("daemon/core.py"),
+    Path("daemon/__main__.py"),
+    Path("daemon/backends/base.py"),
+    Path("daemon/backends/macos.py"),
+    Path("daemon/backends/linux.py"),
+    Path("daemon/backends/windows.py"),
     Path("daemon/tray_windows.py"),
     Path("daemon/autostart_windows.py"),
 ]
 
 
 def test_no_wsl_paths_in_daemon():
-    """daemon/claude_usage_daemon_windows.py references no WSL paths."""
-    _assert_clean(Path("daemon/claude_usage_daemon_windows.py"))
+    """daemon/core.py and backends reference no WSL paths."""
+    for src in [
+        Path("daemon/core.py"),
+        Path("daemon/__main__.py"),
+        Path("daemon/backends/base.py"),
+        Path("daemon/backends/macos.py"),
+        Path("daemon/backends/linux.py"),
+        Path("daemon/backends/windows.py"),
+    ]:
+        _assert_clean(src)
 
 
 def test_no_wsl_paths_in_tray():

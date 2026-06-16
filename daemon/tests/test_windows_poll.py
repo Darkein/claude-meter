@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daemon.claude_usage_daemon_windows import AuthError, poll_api
+from daemon.core import AuthError, poll_api
 
 
 # ---------------------------------------------------------------------------

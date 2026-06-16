@@ -180,7 +180,8 @@ def main() -> None:
     from pystray import Menu, MenuItem
 
     import daemon.autostart_windows as autostart
-    from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
+    from daemon.core import main as daemon_main, log as daemon_log
+    from daemon.backends.windows import WindowsBackend
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
@@ -197,7 +198,7 @@ def main() -> None:
         # failure mode). Surface it instead — log the traceback to the rotating
         # file and flip the tray to an actionable error state.
         try:
-            _asyncio.run(daemon_main(tray_state=ts))
+            _asyncio.run(daemon_main(WindowsBackend(), tray_state=ts))
         except Exception as e:  # last-resort thread guard
             import traceback
             daemon_log(f"Daemon thread crashed: {e!r}")

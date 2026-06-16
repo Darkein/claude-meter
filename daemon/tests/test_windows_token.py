@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for daemon/claude_usage_daemon_windows.py — TOKEN-01.
+"""Unit tests for Windows token handling — TOKEN-01.
 
 Run: python -m pytest daemon/tests/test_windows_token.py -x -q
 """
@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from daemon.claude_usage_daemon_windows import _extract_access_token, read_token, _windows_credential_candidates, _read_expiry
+from daemon.core import _extract_access_token
+from daemon.backends.windows import read_token, _windows_credential_candidates, _read_expiry
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -45,7 +46,7 @@ def test_read_token_primary_path(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CREDENTIALS_PATH", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     # Monkeypatch _windows_credential_candidates to return only our tmp path
-    import daemon.claude_usage_daemon_windows as mod
+    import daemon.backends.windows as mod
     monkeypatch.setattr(mod, "_windows_credential_candidates", lambda: [creds])
     assert read_token() == "sk-ant-test-PRIMARY"
 
@@ -59,7 +60,7 @@ def test_read_token_localappdata_fallback(tmp_path, monkeypatch):
     present_localappdata.parent.mkdir(parents=True)
     present_localappdata.write_text(json.dumps({"accessToken": "sk-ant-test-LA"}))
 
-    import daemon.claude_usage_daemon_windows as mod
+    import daemon.backends.windows as mod
     monkeypatch.setattr(
         mod,
         "_windows_credential_candidates",
@@ -77,7 +78,7 @@ def test_read_token_appdata_fallback(tmp_path, monkeypatch):
     present_appdata.parent.mkdir(parents=True)
     present_appdata.write_text(json.dumps({"accessToken": "sk-ant-test-APP"}))
 
-    import daemon.claude_usage_daemon_windows as mod
+    import daemon.backends.windows as mod
     monkeypatch.setattr(
         mod,
         "_windows_credential_candidates",
@@ -142,30 +143,28 @@ def test_read_expiry_non_dict_json_returns_unknown(tmp_path, monkeypatch):
 # --- WR-02: D-06 redaction requirement must be tested ---
 
 def test_main_emits_linux_warning(monkeypatch):
-    """__main__ prints a non-fatal stderr warning on non-Windows platforms (new async runner).
+    """python -m daemon prints a non-fatal stderr warning on non-Windows platforms.
 
-    Phase 2 replaced the Phase 1 token-printing __main__ with asyncio.run(main()). The
-    new contract:
-      - On non-Windows: emits "WinRT BLE will not be available" to stderr before the loop.
-      - Enters the async scan/connect/poll loop (no longer prints token/expiry).
-    This test interrupts the process after 3s to capture the warning without hanging.
+    On non-Windows non-darwin: emits "WinRT BLE will not be available" to stderr
+    before the loop. On macOS this test is skipped (darwin takes MacOSBackend path).
     """
-    env = {**__import__("os").environ, "CLAUDE_CREDENTIALS_PATH": str(FIXTURES / "credentials_nested.json")}
+    import os as _os
+    if sys.platform == "darwin":
+        pytest.skip("macOS takes MacOSBackend, not the linux/warning path")
+    repo_root = str(Path(__file__).parent.parent.parent)
+    env = {**_os.environ, "CLAUDE_CREDENTIALS_PATH": str(FIXTURES / "credentials_nested.json")}
     env.pop("CLAUDE_CONFIG_DIR", None)
-    module = str(Path(__file__).parent.parent / "claude_usage_daemon_windows.py")
     try:
         result = subprocess.run(
-            [sys.executable, module],
+            [sys.executable, "-m", "daemon"],
             capture_output=True,
             text=True,
             env=env,
             timeout=3,
+            cwd=repo_root,
         )
-        # If it exits cleanly, verify warning was emitted
         assert "WinRT BLE will not be available" in result.stderr
     except subprocess.TimeoutExpired as exc:
-        # Process is hanging in the scan loop — expected behavior on Linux.
-        # The warning should appear in the partial stderr captured so far.
         partial_stderr = (exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         assert "WinRT BLE will not be available" in partial_stderr, (
             f"Expected Linux/WSL warning in stderr before scan loop, got: {partial_stderr!r}"
@@ -173,25 +172,25 @@ def test_main_emits_linux_warning(monkeypatch):
 
 
 def test_main_emits_linux_warning_before_loop(monkeypatch):
-    """__main__ stderr warning appears before the async scan loop starts on Linux/WSL."""
-    import signal as _signal
-    env = {**__import__("os").environ}
+    """python -m daemon stderr warning appears before the async scan loop starts on Linux/WSL."""
+    import os as _os
+    if sys.platform == "darwin":
+        pytest.skip("macOS takes MacOSBackend, not the linux/warning path")
+    repo_root = str(Path(__file__).parent.parent.parent)
+    env = {**_os.environ}
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("CLAUDE_CREDENTIALS_PATH", None)
-    module = str(Path(__file__).parent.parent / "claude_usage_daemon_windows.py")
     try:
         result = subprocess.run(
-            [sys.executable, module],
+            [sys.executable, "-m", "daemon"],
             capture_output=True,
             text=True,
             env=env,
             timeout=3,
+            cwd=repo_root,
         )
-        # If it exits cleanly (KeyboardInterrupt path), check warning
         assert "WinRT BLE will not be available" in result.stderr
     except subprocess.TimeoutExpired as exc:
-        # Process is hanging in the scan loop — expected behavior on Linux.
-        # The warning should appear in the partial stderr captured so far.
         partial_stderr = (exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         assert "WinRT BLE will not be available" in partial_stderr, (
             f"Expected Linux/WSL warning in stderr before scan loop, got: {partial_stderr!r}"

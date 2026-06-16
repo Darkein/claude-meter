@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quick end-to-end test of the macOS connected-peripheral path.
 
-Discovers the HID-held 'Claude Controller', connects without scanning,
+Discovers the HID-held 'Clawdmeter', connects without scanning,
 finds the custom GATT characteristics, and writes one test payload.
 Run from Terminal.app (which has Bluetooth permission):
 
@@ -9,14 +9,14 @@ Run from Terminal.app (which has Bluetooth permission):
 """
 import asyncio
 
-from bleak import BleakClient
-
-import claude_usage_daemon as d
+from daemon import core as d
+from daemon.backends.macos import MacOSBackend
 
 
 async def main() -> None:
+    backend = MacOSBackend()
     d.log("Discovering target via macOS connected-peripheral path...")
-    target = await d.discover_target()
+    target = await backend.discover_target()
     if not target:
         d.log("FAIL: no target found (device powered on and showing splash?)")
         return
@@ -24,7 +24,7 @@ async def main() -> None:
     display = target if isinstance(target, str) else f"{target.name} [{target.address}]"
     d.log(f"Target: {display}")
 
-    client = BleakClient(target)
+    client = backend.make_client(target)
     d.log("Connecting (should NOT scan)...")
     await client.connect()
     if not client.is_connected:
