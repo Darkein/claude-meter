@@ -9,6 +9,11 @@
 // redundant sleep-out commands (each carries ~240ms of settle delay).
 static bool panel_slept = false;
 
+// True between a manual PWR-off (idle_sleep_now) and the next genuine wake.
+// Suppresses the on-USB auto-wake so the user can turn the screen off while
+// plugged in; any real wake (button/touch, Claude activity) clears it.
+static bool manual_sleep = false;
+
 enum IdleState {
     STATE_AWAKE,
     STATE_FADING_OUT,
@@ -23,6 +28,7 @@ static uint32_t fade_last_step_ms = 0;
 static uint8_t  fade_from = DISPLAY_DEFAULT_BRIGHTNESS;
 static uint8_t  fade_to   = 0;
 static uint8_t  awake_brightness = DISPLAY_DEFAULT_BRIGHTNESS;  // user-set "full" level (brightness.cpp)
+static uint32_t s_timeout_ms = IDLE_TIMEOUT_MS;                 // runtime auto-sleep delay; 0 = never (sleeptimeout.cpp)
 
 static void apply_brightness(uint8_t b) {
     display_hal_set_brightness(b);
@@ -32,9 +38,12 @@ static void begin_fade(uint8_t to, uint32_t now) {
     // Waking: power the panel controller back on before the brightness ramp so
     // the first non-zero step actually lights pixels. Sleep-out is ~240ms; it
     // only runs on a genuine wake (callers gate begin_fade(awake) on asleep).
-    if (to != 0 && panel_slept) {
-        display_hal_wake();
-        panel_slept = false;
+    if (to != 0) {
+        manual_sleep = false;   // any wake clears a manual screen-off
+        if (panel_slept) {
+            display_hal_wake();
+            panel_slept = false;
+        }
     }
     fade_from = (to == 0) ? awake_brightness : 0;
     fade_to   = to;
@@ -46,6 +55,18 @@ void idle_init(void) {
     state = STATE_AWAKE;
     last_activity_ms = millis();
     apply_brightness(awake_brightness);
+}
+
+void idle_set_timeout_ms(uint32_t ms) {
+    s_timeout_ms = ms;
+    // Resetting the activity clock here means a freshly-chosen delay starts
+    // counting from now, not from the last touch — no surprise instant sleep
+    // when shortening the delay from the Settings screen.
+    last_activity_ms = millis();
+}
+
+uint32_t idle_get_timeout_ms(void) {
+    return s_timeout_ms;
 }
 
 void idle_set_awake_brightness(uint8_t level) {
@@ -97,6 +118,7 @@ void idle_wake(void) {
 
 void idle_sleep_now(void) {
     if (state == STATE_ASLEEP || state == STATE_FADING_OUT) return;
+    manual_sleep = true;   // user explicitly turned the screen off — keep it off on USB
     begin_fade(0, millis());
     state = STATE_FADING_OUT;
 }
@@ -108,7 +130,9 @@ void idle_tick(void) {
     // when power comes back. Treats USB-in as continuous activity.
     if (!IDLE_SLEEP_WHEN_CHARGING && power_hal_is_vbus_in()) {
         last_activity_ms = now;
-        if (state == STATE_ASLEEP || state == STATE_FADING_OUT) {
+        // Don't fight a manual PWR-off: only the on-USB auto-wake is suppressed;
+        // a button/touch or Claude-activity wake clears manual_sleep first.
+        if (!manual_sleep && (state == STATE_ASLEEP || state == STATE_FADING_OUT)) {
             begin_fade(awake_brightness, now);
             state = STATE_FADING_IN;
         }
@@ -116,7 +140,7 @@ void idle_tick(void) {
 
     switch (state) {
     case STATE_AWAKE:
-        if (now - last_activity_ms >= IDLE_TIMEOUT_MS) {
+        if (s_timeout_ms != 0 && now - last_activity_ms >= s_timeout_ms) {
             begin_fade(0, now);
             state = STATE_FADING_OUT;
         }

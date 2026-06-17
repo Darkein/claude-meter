@@ -115,12 +115,13 @@ static uint8_t        s_seq_len = 0;
 static uint8_t        s_idx     = 0;
 static double         s_phase   = 0.0;   // carried across tick boundaries (continuous)
 
-// Volume: index 0..3 selects the sine amplitude. 0 = silent (audio_hal_play
-// early-returns). The DAC hardware gain (reg 0x32) is fixed; we scale the PCM
-// waveform instead so there's no I2C latency mid-chime. Level 2 (Med) ≈ the
-// amplitude the user signed off on; 1 and 3 bracket it.
-static const float VOL_AMP[4] = { 0.0f, 5000.0f, 10000.0f, 18000.0f };
-static uint8_t     s_vol_idx  = 2;
+// Volume: a continuous 0..255 value scales the sine amplitude linearly up to
+// VOL_AMP_MAX. 0 = silent (audio_hal_play early-returns). The DAC hardware gain
+// (reg 0x32) is fixed; we scale the PCM waveform instead so there's no I2C
+// latency mid-chime. VOL_AMP_MAX is the loudest amplitude (was the old level-3).
+#define VOL_AMP_MAX 18000.0f
+static uint8_t s_vol = 160;          // 0..255 (raw); ~mid by default
+static float   s_amp = VOL_AMP_MAX * 160.0f / 255.0f;
 
 static void render_note(const chime_note_t& n) {
     const int total = (int)((long)SAMPLE_RATE * n.ms / 1000);
@@ -138,7 +139,7 @@ static void render_note(const chime_note_t& n) {
             float env = 1.0f;
             if (g < edge)            env = (float)g / edge;
             else if (g > total - edge) env = (float)(total - g) / edge;
-            buf[i] = (int16_t)(sin(s_phase) * VOL_AMP[s_vol_idx] * env);
+            buf[i] = (int16_t)(sin(s_phase) * s_amp * env);
             s_phase += dphi;
             if (s_phase > 2.0 * M_PI) s_phase -= 2.0 * M_PI;
         }
@@ -160,19 +161,19 @@ void audio_hal_init(void) {
 
 void audio_hal_play(audio_sound_t sound) {
     if (!s_ready || s_seq) return;   // ignore if busy with a chime
-    if (s_vol_idx == 0) return;      // muted
+    if (s_vol == 0) return;          // muted
     if (sound == SND_ALERT) { s_seq = CHIME_ALERT; s_seq_len = 3; }
     else                    { s_seq = CHIME_DONE;  s_seq_len = 2; }
     s_idx = 0;
     s_phase = 0.0;
 }
 
-void audio_hal_set_volume(uint8_t level) {
-    if (level > 3) level = 3;
-    s_vol_idx = level;
+void audio_hal_set_volume(uint8_t val) {
+    s_vol = val;
+    s_amp = VOL_AMP_MAX * (float)val / 255.0f;
 }
 
-uint8_t audio_hal_get_volume(void) { return s_vol_idx; }
+uint8_t audio_hal_get_volume(void) { return s_vol; }
 
 void audio_hal_tick(void) {
     if (!s_ready) return;

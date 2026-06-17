@@ -6,9 +6,10 @@ via PlatformIO's `build_src_filter`. Adding a board means dropping in a new
 folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Two reference ports today:
+Three reference ports today:
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
+- `boards/waveshare_amoled_216_c6/` — Waveshare **ESP32-C6**-Touch-AMOLED-2.16 (same CO5300 480×480 panel as the S3 2.16, CST9220 touch, ES8311 audio + speaker). Single-core RISC-V @160MHz, Wi-Fi 6, **no PSRAM**, BLE 5.3 only (no classic BT). Build env: `waveshare_amoled_216_c6`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
 
 The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
@@ -23,6 +24,17 @@ Connects to a host daemon over BLE; daemon polls Anthropic API for usage data. T
 - PMU: **AXP2101** on same I2C bus (addr=0x34) — battery, USB VBUS, PWR button IRQ
 - IMU: **QMI8658** on same I2C bus (addr=0x6B) — accelerometer for auto-rotation
 - Buttons: GPIO 0 (left → Space/voice-mode), GPIO 18 (right → Shift+Tab/mode-toggle), AXP PKEY (middle → cycle screens; on splash → cycle animations)
+
+### AMOLED-2.16 (C6 - default board)
+Same 480×480 CO5300 panel as the S3 2.16, but a **different SoC and GPIO map**. SoC: **ESP32-C6** — single-core RISC-V @160MHz, Wi-Fi 6 (2.4GHz), **BLE 5.3 only (no classic BT)**, **no PSRAM**, 16MB NOR flash. Onboard chip antenna; IPEX1 external-antenna option via resoldering one resistor. Pins verified against the official Waveshare XiaoZhi BSP.
+- Display: **CO5300** AMOLED via QSPI (CS=15, SCLK=0, SDIO0..3=1..4). **No MCU RST GPIO** — LCD_RST is fed by the AXP2101 **ALDO3** panel rail (cycling the rail resets the panel); `Arduino_CO5300` gets `GFX_NOT_DEFINED` for reset. That class's `begin()` covers most init but the panel stays black without the MFR page-0x20 driving-voltage regs (`0x19`/`0x1C`), set in `send_panel_driving_init()` after `begin()`. MADCTL kept at class default 0x00 (USB port on the side = preferred desk orientation).
+- Touch: **CST9220** via I2C (SDA=8, SCL=7, INT=5, RST=11, addr=0x5A). Same controller as the S3 2.16 — SensorLib `TouchDrvCST92xx` (CST92xx) drives it. *(the `board.h` comment still calls it "CST9217"; cosmetic — the `CST9220_ADDR` macro and the official GPIO schema both say CST9220.)*
+- PMU: **AXP2101** @ 0x34 — battery (MX1.25 2-pin Li-ion header, charge/discharge), USB VBUS, PWR button. The PWR button sits on the AXP **PWRKEY**; firmware reads short/long/release by polling the AXP IRQ status over I2C (`power.cpp`), not via the GPIO18 IRQ line the schema shows. Panel rails: ALDO3 = panel (+ LCD_RST), ALDO2 = panel power-enable + speaker-amp enable (PA_CTRL).
+- IMU: **QMI8658** @ 0x6B — present, initialized for I2C bus health; polled (INT1=GPIO16, INT2=GPIO17 wired but unused). Rotation disabled (`has_rotation=0`, no PSRAM headroom for a rotation strip).
+- RTC: **PCF85063** @ 0x51 on the shared I2C bus — keeps wall-clock time offline (`BOARD_HAS_RTC`).
+- Audio: **ES8311** codec @ 0x18 (I2C control on the shared bus; I2S MCLK=19, BCLK/SCLK=20, LRCK=22, DOUT/DSDIN=23, DIN/ASDOUT=21) → speaker amp (PA_CTRL = AXP ALDO2) → 2-pin speaker pads. Firmware plays synthesized chimes **DAC-only @16kHz/16-bit/mono**; codec init is hand-rolled (no vendored codec lib, same stance as touch). **ES7210** ADC + dual-mic array (echo-cancel/voice, shares the I2S bus on 21/22/23) and the **micro-SD slot** (SCK=0/MOSI=1/MISO=2 shared with the QSPI display pins, CS=GPIO6; FAT32) are populated on the board but **unused by firmware**.
+- Orientation: **fixed at 0°**. No rotation. Even-aligned flush regions required (CO5300) — `display_hal_round_area`.
+- Buttons: **GPIO 9** (BOOT → primary, cycles brightness; **hold while powering on = serial download mode**), **GPIO 10** (KEY → secondary, cycles chime volume), AXP PWRKEY (PWR → cycle screens; hold ~3s + release = pairing; long-press = power off, short-press = power on). All three confirmed on the official GPIO schema. `BOARD_HAS_SECONDARY_BUTTON` = 1, no third GPIO button.
 
 ### AMOLED-1.8 (newer port)
 **Two hardware revisions ship under this name; the firmware probes I2C at boot and picks drivers automatically (`board_rev()`):**
@@ -47,6 +59,7 @@ firmware/src/
     imu_hal.h               — init / tick / rotation_quadrant
   boards/
     waveshare_amoled_216/   — CO5300 + CST9220 + AXP PKEY + QMI8658 rotation
+    waveshare_amoled_216_c6/ — ESP32-C6: CO5300 + CST9220 + AXP + QMI8658 + PCF85063 RTC + ES8311 audio (no PSRAM, BLE-only)
     waveshare_amoled_18/    — SH8601 + FT3168 + AXP + XCA9554 (PWR via EXIO4), no rotation
     template/               — copy this to bootstrap a new port
   main.cpp                  — setup() + loop(): HAL calls only, zero #ifdef BOARD_*
@@ -64,25 +77,30 @@ docs/porting/               — adding-a-board.md, hal-contract.md, capability-f
 Each board folder contains: `board.h` (pins, I2C addresses, `BOARD_HAS_*` flags),
 `board_init.cpp` (Wire.begin + any IO expander), `display.cpp`, `touch.cpp`,
 `input.cpp`, `power.cpp`, `imu.cpp`, `caps.cpp` (the `BoardCaps` instance), plus
-any board-private hardware drivers (e.g. `io_expander.{h,cpp}` on AMOLED-1.8).
+any board-private hardware drivers (e.g. `io_expander.{h,cpp}` on AMOLED-1.8,
+`audio.cpp` for the ES8311 codec on the C6).
 PlatformIO's `build_src_filter` includes shared code + one board's folder per env.
 
 ## Build / flash
 
 ```bash
 pio run -d firmware -e waveshare_amoled_216                                     # build 2.16 (default original)
+pio run -d firmware -e waveshare_amoled_216_c6                                  # build C6 2.16
 pio run -d firmware -e waveshare_amoled_18                                      # build 1.8 (new port)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
+pio run -d firmware -e waveshare_amoled_216_c6 -t upload --upload-port /dev/cu.usbmodem101 # flash C6 on macOS
 ```
 
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
 
-Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. The S3 boards expose native USB-JTAG (no boot-mode dance needed). The **C6 has only USB-Serial-JTAG (HWCDC)** — its env sets both `ARDUINO_USB_CDC_ON_BOOT=1` and `ARDUINO_USB_MODE=1` so `Serial` maps to HWCDCSerial. Asserting **DTR while pulsing reset holds GPIO9 LOW → the C6 drops into serial download mode** instead of running the app; reset it cleanly with DTR=False + an RTS pulse.
 
 ## QA your own UI changes — don't ask the user
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
+
+**Not supported on the C6** — a full-frame RGB565 snapshot (~460 KB) doesn't fit in C6 internal SRAM, so `LV_USE_SNAPSHOT=0` there and the command prints `SCREENSHOT_UNSUPPORTED`. QA C6 UI by eye (or temporarily boot to the target screen).
 
 The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
 
@@ -98,6 +116,7 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
 10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
+11. **C6 has no PSRAM.** Its env omits `-DBOARD_HAS_PSRAM`; shared code (`main.cpp`, `splash.cpp`) gates on this to allocate LVGL buffers + the splash canvas from `MALLOC_CAP_INTERNAL` and shrink them. `LV_USE_SNAPSHOT=0` (screenshot unsupported). The C6 also needs the 16MB partition layout (`board_build.partitions = default_16MB.csv`) — the default 1.25MB app partition can't hold the ~1.43MB firmware.
 
 ## Icons
 
@@ -123,6 +142,7 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 - **Project audit (2026-06-13).** Full feature inventory + prioritized stability/improvement backlog in [`docs/audit.md`](docs/audit.md). Living doc — consult before planning fixes. Covers the Claude live-state pipeline in depth (hooks → daemon heuristics → firmware), a remote-approval improvement roadmap, and a list of verified-false findings not to re-chase.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
+- Added third board port: Waveshare **ESP32-C6**-AMOLED-2.16 (CO5300 + CST9220, no PSRAM, BLE-only). Adds an audio path (ES8311 codec + speaker chimes) and PCF85063 RTC. Internal-SRAM LVGL buffers; screenshot unsupported.
 - Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
 - Migrated from Panlee SC01 Plus (480×320 IPS) to Waveshare 2.16" AMOLED (480×480 square). Full hardware/library swap.
 - Added IMU auto-rotation, battery indicator, USB-state-aware screen switching.

@@ -12,6 +12,7 @@
 #include "idle_cfg.h"
 #include "brightness.h"
 #include "volume.h"
+#include "sleeptimeout.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -206,6 +207,7 @@ void setup() {
     display_hal_begin();
     idle_init();        // takes over panel brightness and starts the idle timer
     brightness_init();  // load the user's saved brightness level and apply via idle
+    sleeptimeout_init(); // load the user's saved auto-sleep delay and apply to idle
 
     power_hal_init();
     imu_hal_init();

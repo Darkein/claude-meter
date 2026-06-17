@@ -19,7 +19,8 @@ void audio_hal_init(void);
 void audio_hal_tick(void);
 void audio_hal_play(audio_sound_t sound);
 
-// Volume level 0..3 (0 = off/mute, 3 = loudest). Boards without audio no-op
-// on set and return 0 on get. Persistence lives in volume.{h,cpp}, not here.
-void    audio_hal_set_volume(uint8_t level);
+// Volume 0..255 (0 = off/mute, 255 = loudest), applied continuously to the
+// codec amplitude. Boards without audio no-op on set and return 0 on get.
+// Persistence lives in volume.{h,cpp}, not here.
+void    audio_hal_set_volume(uint8_t val);
 uint8_t audio_hal_get_volume(void);

@@ -1,9 +1,16 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 void idle_init(void);
 void idle_tick(void);
 void idle_note_activity(void);
+
+// Runtime auto-sleep delay (ms). Defaults to IDLE_TIMEOUT_MS; the Settings
+// screen overrides it via sleeptimeout.{h,cpp}. A value of 0 means "never
+// sleep". Persistence lives in sleeptimeout, not here.
+void     idle_set_timeout_ms(uint32_t ms);
+uint32_t idle_get_timeout_ms(void);
 
 // Set the "awake" brightness target (0..255). idle owns display brightness
 // (it fades between this and 0), so user brightness control routes through

@@ -9,6 +9,9 @@
 #include "ble.h"
 #include "clock.h"
 #include "idle.h"
+#include "brightness.h"
+#include "volume.h"
+#include "sleeptimeout.h"
 #include <time.h>
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -50,6 +53,13 @@ struct Layout
     const lv_font_t *bt_device_font;
     const lv_font_t *bt_credit_1_font;
     const lv_font_t *bt_credit_2_font;
+
+    // Settings screen
+    int16_t set_row_y;      // top of the first settings row
+    int16_t set_row_gap;    // vertical distance between consecutive rows
+    int16_t set_slider_dy;  // slider offset below its row's name/value labels
+    int16_t set_slider_h;   // slider track height (touch target)
+    const lv_font_t *set_label_font;
 };
 static Layout L = {};
 
@@ -79,6 +89,11 @@ static void compute_layout(const BoardCaps &c)
         L.bt_device_font = &font_styrene_28;
         L.bt_credit_1_font = &font_styrene_24;
         L.bt_credit_2_font = &font_styrene_20;
+        L.set_row_y = 110;
+        L.set_row_gap = 115;
+        L.set_slider_dy = 46;
+        L.set_slider_h = 26;
+        L.set_label_font = &font_styrene_28;
     }
     else
     {
@@ -95,6 +110,11 @@ static void compute_layout(const BoardCaps &c)
         L.bt_device_font = &font_styrene_20;
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
+        L.set_row_y = 92;
+        L.set_row_gap = 100;
+        L.set_slider_dy = 38;
+        L.set_slider_h = 22;
+        L.set_label_font = &font_styrene_20;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -154,6 +174,12 @@ static lv_obj_t *clock_container;
 static lv_obj_t *lbl_clock_time;
 static lv_obj_t *lbl_clock_date;
 static lv_obj_t *lbl_clock_batt;
+
+// ---- Settings screen (brightness / volume / sleep-delay sliders) ----
+static lv_obj_t *settings_container;
+static lv_obj_t *sld_brightness, *lbl_brightness_val;
+static lv_obj_t *sld_volume, *lbl_volume_val;     // volume row absent when !has_audio
+static lv_obj_t *sld_sleep, *lbl_sleep_val;
 
 // ---- Permission screen (mirrors Claude Code's permission prompt, info-only) ----
 static lv_obj_t *approval_container;
@@ -640,6 +666,172 @@ static void clock_refresh(void)
         lv_label_set_text_fmt(lbl_clock_batt, "%d %%", pct);
 }
 
+// ======== Settings Screen ========
+//
+// Brightness / volume / sleep-delay sliders. Reached by swiping. Each slider
+// previews live on drag (LV_EVENT_VALUE_CHANGED) and persists on release
+// (LV_EVENT_RELEASED) so a continuous drag never hammers NVS. The volume row is
+// built only when the board has real audio hardware (board_caps().has_audio).
+// Sliders own their own touch, so a drag on a slider adjusts it while a swipe
+// over empty area bubbles up and changes screens.
+
+static lv_obj_t *make_slider(lv_obj_t *parent, int x, int y, int w, int h,
+                             int min, int max, int val)
+{
+    lv_obj_t *s = lv_slider_create(parent);
+    lv_obj_set_pos(s, x, y);
+    lv_obj_set_size(s, w, h);
+    lv_slider_set_range(s, min, max);
+    lv_slider_set_value(s, val, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s, COL_ACCENT, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s, COL_TEXT, LV_PART_KNOB);
+    lv_obj_set_style_radius(s, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s, 8, LV_PART_KNOB); // enlarge the knob beyond the track
+    // Extend the touch hit-area past the visible track so a near-miss still grabs
+    // the slider instead of bubbling up to the screen-swipe gesture.
+    lv_obj_set_ext_click_area(s, 18);
+    return s;
+}
+
+// Build one "Name ........ value" row with a full-width slider underneath.
+// Returns the slider; *out_val receives the right-aligned value label.
+static lv_obj_t *make_setting_row(lv_obj_t *parent, int y, const char *name,
+                                  lv_obj_t **out_val, int min, int max, int val)
+{
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, name);
+    lv_obj_set_style_text_font(lbl, L.set_label_font, 0);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_set_pos(lbl, L.margin, y);
+
+    *out_val = lv_label_create(parent);
+    lv_obj_set_style_text_font(*out_val, L.set_label_font, 0);
+    lv_obj_set_style_text_color(*out_val, COL_DIM, 0);
+    lv_obj_align(*out_val, LV_ALIGN_TOP_RIGHT, -L.margin, y);
+
+    return make_slider(parent, L.margin, y + L.set_slider_dy, L.content_w, L.set_slider_h, min, max, val);
+}
+
+static void brightness_slider_cb(lv_event_t *e)
+{
+    int v = lv_slider_get_value((lv_obj_t *)lv_event_get_target(e));
+    lv_label_set_text_fmt(lbl_brightness_val, "%d%%", v * 100 / 255);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED)
+        brightness_set((uint8_t)v); // persist
+    else
+        brightness_preview((uint8_t)v); // live, no NVS
+}
+
+static void volume_slider_cb(lv_event_t *e)
+{
+    int v = lv_slider_get_value((lv_obj_t *)lv_event_get_target(e));
+    lv_label_set_text_fmt(lbl_volume_val, "%d%%", v * 100 / 255);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED)
+        volume_set((uint8_t)v); // persist + confirmation chime
+    else
+        volume_preview((uint8_t)v); // live, no NVS
+}
+
+static void sleep_slider_cb(lv_event_t *e)
+{
+    int idx = lv_slider_get_value((lv_obj_t *)lv_event_get_target(e));
+    lv_label_set_text(lbl_sleep_val, sleeptimeout_label((uint8_t)idx));
+    // Sleep delay has no live effect to preview, so only act on release.
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED)
+        sleeptimeout_set((uint8_t)idx);
+}
+
+static void init_settings_screen(lv_obj_t *scr)
+{
+    settings_container = lv_obj_create(scr);
+    lv_obj_set_size(settings_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(settings_container, 0, 0);
+    lv_obj_set_style_bg_opa(settings_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(settings_container, 0, 0);
+    lv_obj_set_style_pad_all(settings_container, 0, 0);
+    lv_obj_clear_flag(settings_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(settings_container, LV_OBJ_FLAG_GESTURE_BUBBLE); // empty-area swipe -> screen cb
+
+    lv_obj_t *title = lv_label_create(settings_container);
+    lv_label_set_text(title, "Settings");
+    lv_obj_set_style_text_font(title, L.bt_title_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    int y = L.set_row_y;
+
+    int b = brightness_get();
+    sld_brightness = make_setting_row(settings_container, y, "Brightness",
+                                      &lbl_brightness_val, BRIGHTNESS_MIN, 255, b);
+    lv_label_set_text_fmt(lbl_brightness_val, "%d%%", b * 100 / 255);
+    lv_obj_add_event_cb(sld_brightness, brightness_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sld_brightness, brightness_slider_cb, LV_EVENT_RELEASED, NULL);
+    y += L.set_row_gap;
+
+    if (board_caps().has_audio)
+    {
+        int v = volume_get();
+        sld_volume = make_setting_row(settings_container, y, "Volume",
+                                      &lbl_volume_val, 0, 255, v);
+        lv_label_set_text_fmt(lbl_volume_val, "%d%%", v * 100 / 255);
+        lv_obj_add_event_cb(sld_volume, volume_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_event_cb(sld_volume, volume_slider_cb, LV_EVENT_RELEASED, NULL);
+        y += L.set_row_gap;
+    }
+
+    int si = sleeptimeout_get();
+    sld_sleep = make_setting_row(settings_container, y, "Sleep after",
+                                 &lbl_sleep_val, 0, sleeptimeout_count() - 1, si);
+    lv_label_set_text(lbl_sleep_val, sleeptimeout_label((uint8_t)si));
+    lv_obj_add_event_cb(sld_sleep, sleep_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sld_sleep, sleep_slider_cb, LV_EVENT_RELEASED, NULL);
+
+    lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN); // shown via swipe
+}
+
+// Re-sync the sliders + value labels to the live values. Called on screen entry
+// AND every loop while Settings is showing (from ui_tick_anim) so changes made
+// via the physical buttons (brightness_cycle / volume_cycle) appear live. The
+// per-field change guard means we only touch LVGL when a value actually moved,
+// so the per-loop call costs nothing and doesn't fight an in-progress drag
+// (a drag updates the underlying value to match the slider, so nothing changes).
+static void settings_refresh(void)
+{
+    if (!settings_container)
+        return;
+    static int last_b = -1, last_v = -1, last_s = -1;
+
+    int b = brightness_get();
+    if (b != last_b)
+    {
+        last_b = b;
+        lv_slider_set_value(sld_brightness, b, LV_ANIM_OFF);
+        lv_label_set_text_fmt(lbl_brightness_val, "%d%%", b * 100 / 255);
+    }
+    if (sld_volume)
+    {
+        int v = volume_get();
+        if (v != last_v)
+        {
+            last_v = v;
+            lv_slider_set_value(sld_volume, v, LV_ANIM_OFF);
+            lv_label_set_text_fmt(lbl_volume_val, "%d%%", v * 100 / 255);
+        }
+    }
+    int si = sleeptimeout_get();
+    if (si != last_s)
+    {
+        last_s = si;
+        lv_slider_set_value(sld_sleep, si, LV_ANIM_OFF);
+        lv_label_set_text(lbl_sleep_val, sleeptimeout_label((uint8_t)si));
+    }
+}
+
 // ======== Approval Screen ========
 //
 // Shown automatically when the daemon reports a pending tool-permission prompt
@@ -763,6 +955,7 @@ void ui_init(void)
 
     init_usage_screen(scr);
     init_clock_screen(scr);
+    init_settings_screen(scr);
     init_approval_screen(scr);
 
     logo_img = lv_image_create(scr);
@@ -949,6 +1142,11 @@ void ui_tick_anim(void)
         clock_refresh();
         return;
     }
+    if (current_screen == SCREEN_SETTINGS)
+    {
+        settings_refresh(); // reflect physical-button changes live
+        return;
+    }
     if (current_screen != SCREEN_USAGE)
         return;
     update_view_state();
@@ -1033,6 +1231,8 @@ void ui_show_screen(screen_t screen)
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     if (clock_container)
         lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
+    if (settings_container)
+        lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN);
     if (approval_container)
         lv_obj_add_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
 
@@ -1044,6 +1244,10 @@ void ui_show_screen(screen_t screen)
     case SCREEN_CLOCK:
         lv_obj_clear_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
         clock_refresh(); // paint immediately so the swipe-in isn't blank
+        break;
+    case SCREEN_SETTINGS:
+        lv_obj_clear_flag(settings_container, LV_OBJ_FLAG_HIDDEN);
+        settings_refresh(); // sync sliders to values changed via the buttons
         break;
     case SCREEN_APPROVAL:
         lv_obj_clear_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
@@ -1064,22 +1268,24 @@ screen_t ui_get_current_screen(void)
     return current_screen;
 }
 
-// Carousel navigation. Virtual slot order: [Usage, Clock] + one slot per
-// pending approval (s_approval_n). The approval slots map to SCREEN_APPROVAL
+// Carousel navigation. Virtual slot order: [Usage, Clock, Settings] + one slot
+// per pending approval (s_approval_n). The approval slots map to SCREEN_APPROVAL
 // with s_approval_view_idx selecting which one. Wraps around.
 void ui_swipe(int dir)
 {
     if (dir == 0)
         return;
 
-    int total = 2 + s_approval_n;      // Usage, Clock, then each approval
+    int total = 3 + s_approval_n;      // Usage, Clock, Settings, then each approval
     int cur;
     if (current_screen == SCREEN_USAGE)
         cur = 0;
     else if (current_screen == SCREEN_CLOCK)
         cur = 1;
+    else if (current_screen == SCREEN_SETTINGS)
+        cur = 2;
     else // SCREEN_APPROVAL
-        cur = 2 + (s_approval_n ? s_approval_view_idx : 0);
+        cur = 3 + (s_approval_n ? s_approval_view_idx : 0);
 
     int next = ((cur + dir) % total + total) % total;
 
@@ -1087,9 +1293,11 @@ void ui_swipe(int dir)
         ui_show_screen(SCREEN_USAGE);
     else if (next == 1)
         ui_show_screen(SCREEN_CLOCK);
+    else if (next == 2)
+        ui_show_screen(SCREEN_SETTINGS);
     else
     {
-        s_approval_view_idx = (uint8_t)(next - 2);
+        s_approval_view_idx = (uint8_t)(next - 3);
         approval_refresh_labels();
         ui_show_screen(SCREEN_APPROVAL);
     }

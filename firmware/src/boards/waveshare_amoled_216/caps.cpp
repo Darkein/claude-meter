@@ -10,6 +10,7 @@ static const BoardCaps caps = {
     .has_battery = true,
     .has_imu = true,
     .has_rtc = false,
+    .has_audio = false,
 };
 
 const BoardCaps& board_caps(void) { return caps; }

@@ -1,39 +1,60 @@
 #include "brightness.h"
 #include "idle.h"
+#include "idle_cfg.h"
 #include <Preferences.h>
 #include <Arduino.h>
 
-// Four-step ramp. The default (index 2) is 200 — identical to the prior
-// hard-coded DISPLAY_DEFAULT_BRIGHTNESS, so cycling is purely additive.
-static const uint8_t LEVELS[] = {64, 128, 200, 255};
-#define LEVELS_COUNT (sizeof(LEVELS) / sizeof(LEVELS[0]))
-#define DEFAULT_IDX  2
+// Raw 0..255 PWM value, clamped to [BRIGHTNESS_MIN..255] so the UI can never
+// fully black the panel. Persisted as "brt_val"; the prior 4-level "brt_idx"
+// scheme is abandoned (first boot just falls back to the default).
+static uint8_t cur_val = DISPLAY_DEFAULT_BRIGHTNESS;
 
-static uint8_t cur_idx = DEFAULT_IDX;
+// Coarse steps the physical button cycles through. The slider is fully
+// granular; the button just hops between these familiar levels.
+static const uint8_t PRESETS[] = {64, 128, 200, 255};
+#define PRESETS_COUNT (sizeof(PRESETS) / sizeof(PRESETS[0]))
+
+static uint8_t clamp_val(uint8_t v) {
+    if (v < BRIGHTNESS_MIN) return BRIGHTNESS_MIN;
+    return v;
+}
 
 void brightness_init(void) {
     Preferences prefs;
     prefs.begin("clawdmeter", true);
-    uint8_t saved_idx = prefs.getUChar("brt_idx", 0xFF);
+    uint16_t saved = prefs.getUShort("brt_val", 0xFFFF);
     prefs.end();
 
-    if (saved_idx < LEVELS_COUNT) cur_idx = saved_idx;
-    idle_set_awake_brightness(LEVELS[cur_idx]);
-    Serial.printf("Brightness init: level=%u (idx=%u)\n", LEVELS[cur_idx], cur_idx);
+    if (saved <= 255) cur_val = clamp_val((uint8_t)saved);
+    idle_set_awake_brightness(cur_val);
+    Serial.printf("Brightness init: val=%u\n", cur_val);
 }
 
-void brightness_cycle(void) {
-    cur_idx = (cur_idx + 1) % LEVELS_COUNT;
+void brightness_preview(uint8_t val) {
+    cur_val = clamp_val(val);
+    idle_set_awake_brightness(cur_val);
+}
+
+void brightness_set(uint8_t val) {
+    brightness_preview(val);
 
     Preferences prefs;
     prefs.begin("clawdmeter", false);
-    prefs.putUChar("brt_idx", cur_idx);
+    prefs.putUShort("brt_val", cur_val);
     prefs.end();
+    Serial.printf("Brightness set: val=%u\n", cur_val);
+}
 
-    idle_set_awake_brightness(LEVELS[cur_idx]);
-    Serial.printf("Brightness cycled: level=%u (idx=%u)\n", LEVELS[cur_idx], cur_idx);
+void brightness_cycle(void) {
+    // Hop to the first preset strictly above the current value, wrapping to the
+    // lowest. Keeps the button's "tap to step up, wrap around" feel.
+    uint8_t next = PRESETS[0];
+    for (uint8_t i = 0; i < PRESETS_COUNT; i++) {
+        if (PRESETS[i] > cur_val) { next = PRESETS[i]; break; }
+    }
+    brightness_set(next);
 }
 
 uint8_t brightness_get(void) {
-    return LEVELS[cur_idx];
+    return cur_val;
 }

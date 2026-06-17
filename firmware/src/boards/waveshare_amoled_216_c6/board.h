@@ -67,8 +67,9 @@
 
 // ---- Capability flags ----
 #define BOARD_HAS_SECONDARY_BUTTON 1
-#define BOARD_HAS_ROTATION         0    // C6 has no PSRAM headroom for the rotation strip
+#define BOARD_HAS_ROTATION         1    // IMU-driven CPU rotation; strip lives in internal SRAM (no PSRAM)
 #define BOARD_HAS_IMU              1    // present + initialized for I2C bus health
 #define BOARD_HAS_BATTERY          1
 #define BOARD_HAS_IO_EXPANDER      0    // TCA9554 exists on board but only services audio
 #define BOARD_HAS_RTC              1    // PCF85063 keeps wall-clock time offline
+#define BOARD_HAS_AUDIO            1    // ES8311 codec + speaker (volume control is real)

@@ -19,6 +19,7 @@ struct BoardCaps {
     bool    has_battery;     // AXP2101 battery measurement is meaningful
     bool    has_imu;         // QMI8658 (or compatible) is populated
     bool    has_rtc;         // PCF85063 (or compatible) keeps wall-clock time offline
+    bool    has_audio;       // codec + speaker present (volume control is meaningful)
 };
 
 const BoardCaps& board_caps(void);
