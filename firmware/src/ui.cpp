@@ -12,6 +12,7 @@
 #include "brightness.h"
 #include "volume.h"
 #include "sleeptimeout.h"
+#include "battery_estimate.h"
 #include <time.h>
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -174,6 +175,7 @@ static lv_obj_t *clock_container;
 static lv_obj_t *lbl_clock_time;
 static lv_obj_t *lbl_clock_date;
 static lv_obj_t *lbl_clock_batt;
+static lv_obj_t *lbl_clock_status; // mirrors the usage-screen Claude-state line
 
 // ---- Settings screen (brightness / volume / sleep-delay sliders) ----
 static lv_obj_t *settings_container;
@@ -631,9 +633,26 @@ static void init_clock_screen(lv_obj_t *scr)
     lv_label_set_text(lbl_clock_batt, "");
     lv_obj_set_style_text_font(lbl_clock_batt, &font_styrene_24, 0);
     lv_obj_set_style_text_color(lbl_clock_batt, COL_DIM, 0);
-    lv_obj_align(lbl_clock_batt, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_align(lbl_clock_batt, LV_ALIGN_BOTTOM_MID, 0, -60);
+
+    // Claude-state line — same look + content as the usage screen's lbl_anim,
+    // driven by compute_status_text() from clock_refresh()/ui_tick_anim().
+    lbl_clock_status = lv_label_create(clock_container);
+    lv_label_set_text(lbl_clock_status, "");
+    lv_obj_set_style_text_font(lbl_clock_status, &font_mono_32, 0);
+    lv_obj_set_style_text_color(lbl_clock_status, COL_ACCENT, 0);
+    lv_obj_align(lbl_clock_status, LV_ALIGN_BOTTOM_MID, 0, -15);
 
     lv_obj_add_flag(clock_container, LV_OBJ_FLAG_HIDDEN); // shown via swipe
+}
+
+// Format a duration in minutes as a compact ETA: "~3h20" / "~45 min".
+static void fmt_eta(char *buf, size_t n, int mins)
+{
+    if (mins >= 60)
+        snprintf(buf, n, "~%dh%02d", mins / 60, mins % 60);
+    else
+        snprintf(buf, n, "~%d min", mins < 1 ? 1 : mins);
 }
 
 // Refresh the clock labels from the shared clock + battery. Called each loop
@@ -661,9 +680,25 @@ static void clock_refresh(void)
 
     int pct = power_hal_battery_pct();
     if (pct < 0)
+    {
         lv_label_set_text(lbl_clock_batt, "");
-    else
+        return;
+    }
+    int mins = battery_estimate_mins();
+    bool on_power = power_hal_is_charging() || power_hal_is_vbus_in();
+    if (mins < 0)
         lv_label_set_text_fmt(lbl_clock_batt, "%d %%", pct);
+    else
+    {
+        char eta[16];
+        fmt_eta(eta, sizeof(eta), mins);
+        if (on_power && mins == 0)
+            lv_label_set_text_fmt(lbl_clock_batt, "%d %%   full", pct);
+        else if (on_power)
+            lv_label_set_text_fmt(lbl_clock_batt, "%d %%   full in %s", pct, eta);
+        else
+            lv_label_set_text_fmt(lbl_clock_batt, "%d %%   %s", pct, eta);
+    }
 }
 
 // ======== Settings Screen ========
@@ -940,6 +975,27 @@ static void screen_gesture_cb(lv_event_t *e)
         ui_swipe(-1);
 }
 
+// A tap in the top-left corner toggles the Settings screen: first tap enters
+// from whatever screen we were on, second tap returns there. Settings is NOT
+// part of the swipe carousel. The hit-zone is a transparent corner button
+// (corner_hit) fixed at the logical top-left. Boards that rotate the display
+// un-rotate touch back into this logical frame in their touch driver, so the
+// zone (like the logo it sits under) tracks the viewer in every orientation.
+#define CORNER_ZONE_PX 120
+static lv_obj_t *corner_hit;
+static screen_t settings_return_screen = SCREEN_USAGE;
+static void settings_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    if (current_screen == SCREEN_SETTINGS)
+        ui_show_screen(settings_return_screen);
+    else
+    {
+        settings_return_screen = current_screen;
+        ui_show_screen(SCREEN_SETTINGS);
+    }
+}
+
 void ui_init(void)
 {
     compute_layout(board_caps());
@@ -970,6 +1026,20 @@ void ui_init(void)
     volume_img = lv_image_create(scr);
     lv_image_set_src(volume_img, &volume_dscs[2]);  // med default; volume_init() sets the real level
     lv_obj_set_pos(volume_img, L.scr_w - 48 - L.margin - 48 - 12, L.title_y);
+
+    // Transparent Settings hit-zone, created last so it sits on top of every
+    // screen. Parked over the current physically-top-left corner (the logo's
+    // corner when upright). Swipes that start on it still bubble to the screen.
+    corner_hit = lv_obj_create(scr);
+    lv_obj_set_size(corner_hit, CORNER_ZONE_PX, CORNER_ZONE_PX);
+    lv_obj_set_style_bg_opa(corner_hit, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(corner_hit, 0, 0);
+    lv_obj_set_style_pad_all(corner_hit, 0, 0);
+    lv_obj_clear_flag(corner_hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(corner_hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(corner_hit, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(corner_hit, settings_toggle_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_pos(corner_hit, 0, 0); // logical top-left, over the logo
 }
 
 // React to a change in the cached Claude-state / approval-queue: refresh the
@@ -1135,24 +1205,12 @@ static void update_view_state(void)
     }
 }
 
-void ui_tick_anim(void)
+// Advance the spinner/msg timers and compute the current status string into buf.
+// Returns true when the line should render animated (accent color + spinner).
+// Reads view_state, so callers must run update_view_state() first. Shared by the
+// usage screen (lbl_anim) and the clock screen (lbl_clock_status).
+static bool compute_status_text(char *buf, size_t n)
 {
-    if (current_screen == SCREEN_CLOCK)
-    {
-        clock_refresh();
-        return;
-    }
-    if (current_screen == SCREEN_SETTINGS)
-    {
-        settings_refresh(); // reflect physical-button changes live
-        return;
-    }
-    if (current_screen != SCREEN_USAGE)
-        return;
-    update_view_state();
-    if (view_state == 1)
-        splash_mini_tick(); // animate the sleeping creature on the idle screen
-
     uint32_t now = lv_tick_get();
 
     if (now - anim_msg_start >= ANIM_MSG_MS)
@@ -1160,13 +1218,15 @@ void ui_tick_anim(void)
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
     }
-
-    if (now - anim_last_ms < spinner_ms[anim_spinner_idx])
-        return;
-    anim_last_ms = now;
-    anim_phase = (anim_phase + 1) % SPINNER_PHASES;
-    anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
-                                                    : (SPINNER_PHASES - anim_phase);
+    // Gate only the spinner-frame advance — the text is always produced so a
+    // freshly-shown label (e.g. just after a screen switch) renders immediately.
+    if (now - anim_last_ms >= spinner_ms[anim_spinner_idx])
+    {
+        anim_last_ms = now;
+        anim_phase = (anim_phase + 1) % SPINNER_PHASES;
+        anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
+                                                        : (SPINNER_PHASES - anim_phase);
+    }
 
     // Status text by priority, driven by live Claude Code state when connected.
     // (A pending approval is surfaced on SCREEN_APPROVAL, not here.)
@@ -1206,16 +1266,38 @@ void ui_tick_anim(void)
         text = anim_messages[anim_msg_idx];
     }
 
-    lv_obj_set_style_text_color(lbl_anim, animated ? COL_ACCENT : COL_TEXT, 0);
-    static char buf[80];
     if (animated)
-    {
-        snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6", spinner_frames[anim_spinner_idx], text);
-    }
+        snprintf(buf, n, "%s %s\xE2\x80\xA6", spinner_frames[anim_spinner_idx], text);
     else
+        snprintf(buf, n, "%s", text); // plain, no spinner / ellipsis
+    return animated;
+}
+
+void ui_tick_anim(void)
+{
+    char buf[80];
+    if (current_screen == SCREEN_CLOCK)
     {
-        snprintf(buf, sizeof(buf), "%s", text); // plain, no spinner / ellipsis
+        clock_refresh();
+        update_view_state(); // keep view_state fresh for the status line
+        bool animated = compute_status_text(buf, sizeof(buf));
+        lv_obj_set_style_text_color(lbl_clock_status, animated ? COL_ACCENT : COL_TEXT, 0);
+        lv_label_set_text(lbl_clock_status, buf);
+        return;
     }
+    if (current_screen == SCREEN_SETTINGS)
+    {
+        settings_refresh(); // reflect physical-button changes live
+        return;
+    }
+    if (current_screen != SCREEN_USAGE)
+        return;
+    update_view_state();
+    if (view_state == 1)
+        splash_mini_tick(); // animate the sleeping creature on the idle screen
+
+    bool animated = compute_status_text(buf, sizeof(buf));
+    lv_obj_set_style_text_color(lbl_anim, animated ? COL_ACCENT : COL_TEXT, 0);
     lv_label_set_text(lbl_anim, buf);
 }
 
@@ -1268,24 +1350,25 @@ screen_t ui_get_current_screen(void)
     return current_screen;
 }
 
-// Carousel navigation. Virtual slot order: [Usage, Clock, Settings] + one slot
-// per pending approval (s_approval_n). The approval slots map to SCREEN_APPROVAL
-// with s_approval_view_idx selecting which one. Wraps around.
+// Carousel navigation. Virtual slot order: [Usage, Clock] + one slot per pending
+// approval (s_approval_n). The approval slots map to SCREEN_APPROVAL with
+// s_approval_view_idx selecting which one. Wraps around. Settings is not in the
+// carousel — it is toggled by tapping the logo (logo_click_cb).
 void ui_swipe(int dir)
 {
     if (dir == 0)
         return;
+    if (current_screen == SCREEN_SETTINGS)
+        return; // logo-toggled, not swipeable
 
-    int total = 3 + s_approval_n;      // Usage, Clock, Settings, then each approval
+    int total = 2 + s_approval_n;      // Usage, Clock, then each approval
     int cur;
     if (current_screen == SCREEN_USAGE)
         cur = 0;
     else if (current_screen == SCREEN_CLOCK)
         cur = 1;
-    else if (current_screen == SCREEN_SETTINGS)
-        cur = 2;
     else // SCREEN_APPROVAL
-        cur = 3 + (s_approval_n ? s_approval_view_idx : 0);
+        cur = 2 + (s_approval_n ? s_approval_view_idx : 0);
 
     int next = ((cur + dir) % total + total) % total;
 
@@ -1293,11 +1376,9 @@ void ui_swipe(int dir)
         ui_show_screen(SCREEN_USAGE);
     else if (next == 1)
         ui_show_screen(SCREEN_CLOCK);
-    else if (next == 2)
-        ui_show_screen(SCREEN_SETTINGS);
     else
     {
-        s_approval_view_idx = (uint8_t)(next - 3);
+        s_approval_view_idx = (uint8_t)(next - 2);
         approval_refresh_labels();
         ui_show_screen(SCREEN_APPROVAL);
     }

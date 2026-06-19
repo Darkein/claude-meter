@@ -1,4 +1,5 @@
 #include "../../hal/touch_hal.h"
+#include "../../hal/imu_hal.h"
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -43,9 +44,22 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
         int16_t tx[5], ty[5];
         uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
         if (n > 0) {
+            // The display rotates its content by the IMU quadrant
+            // (display_hal_draw_bitmap); touch arrives in raw panel coordinates,
+            // so undo the same rotation to land back in LVGL's logical frame.
+            // Inverse of rotate_strip's point map on the square 480x480 panel.
+            int rx = tx[0], ry = ty[0];
+            const int S = LCD_WIDTH; // == LCD_HEIGHT (square)
+            int lx, ly;
+            switch (imu_hal_rotation_quadrant()) {
+            case 1:  lx = ry;         ly = S - 1 - rx; break;
+            case 2:  lx = S - 1 - rx; ly = S - 1 - ry; break;
+            case 3:  lx = S - 1 - ry; ly = rx;         break;
+            default: lx = rx;         ly = ry;         break;
+            }
             touch_pressed = true;
-            touch_x = (uint16_t)tx[0];
-            touch_y = (uint16_t)ty[0];
+            touch_x = (uint16_t)lx;
+            touch_y = (uint16_t)ly;
         } else {
             touch_pressed = false;
         }

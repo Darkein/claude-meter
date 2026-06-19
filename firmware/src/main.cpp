@@ -13,6 +13,7 @@
 #include "brightness.h"
 #include "volume.h"
 #include "sleeptimeout.h"
+#include "battery_estimate.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -40,9 +41,21 @@ static uint16_t* buf2 = nullptr;
 
 static uint32_t my_tick(void) { return millis(); }
 
+// Set while send_screenshot() is force-refreshing the screen. PSRAM-free
+// boards can't hold a full framebuffer for lv_snapshot, so they capture by
+// streaming each partial-render strip out the serial port as it flushes.
+static volatile bool g_shot_active = false;
+
 static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
+    if (g_shot_active) {
+        // A full-screen invalidate is split into contiguous, full-width bands
+        // top-to-bottom; concatenating their px_maps reproduces the frame in
+        // row-major RGB565 order — exactly what the host script expects.
+        Serial.write((const uint8_t*)px_map, (size_t)w * h * 2);
+        Serial.flush();
+    }
     display_hal_draw_bitmap(area->x1, area->y1, w, h, (uint16_t*)px_map);
     lv_display_flush_ready(disp);
 }
@@ -142,8 +155,22 @@ static int cmd_pos = 0;
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
     // A full RGB565 framebuffer doesn't fit in internal SRAM on PSRAM-free
-    // boards (e.g. 480×480×2 = 460 KB). Capture is unsupported there.
-    Serial.println("SCREENSHOT_UNSUPPORTED");
+    // boards (e.g. 480×480×2 = 460 KB), so lv_snapshot is out. Instead force a
+    // full redraw and stream each partial-render strip out the serial port as
+    // my_flush_cb sees it — no full-frame buffer needed, just the existing
+    // BUF_LINES strip already in SRAM.
+    const uint32_t w = board_caps().width;
+    const uint32_t h = board_caps().height;
+    const uint32_t buf_size = w * h * 2;
+    Serial.printf("SCREENSHOT_START %lu %lu %lu\n",
+        (unsigned long)w, (unsigned long)h, (unsigned long)buf_size);
+    Serial.flush();
+    g_shot_active = true;
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(NULL);          // renders + flushes every strip synchronously
+    g_shot_active = false;
+    Serial.println();
+    Serial.println("SCREENSHOT_END");
     return;
 #else
     const uint32_t w = board_caps().width;
@@ -208,6 +235,7 @@ void setup() {
     idle_init();        // takes over panel brightness and starts the idle timer
     brightness_init();  // load the user's saved brightness level and apply via idle
     sleeptimeout_init(); // load the user's saved auto-sleep delay and apply to idle
+    battery_estimate_init(); // load persisted per-1% rates for the runtime estimate
 
     power_hal_init();
     imu_hal_init();
@@ -379,6 +407,7 @@ void loop() {
     if (pct != last_pct || charging != last_charging) {
         last_pct = pct;
         last_charging = charging;
+        battery_estimate_update(pct, charging); // learn the per-1% rate
         ui_update_battery(pct, charging);
     }
 

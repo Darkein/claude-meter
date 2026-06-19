@@ -5,7 +5,7 @@
 enum screen_t {
     SCREEN_USAGE,
     SCREEN_CLOCK,      // wall-clock + date + battery; reached by swiping
-    SCREEN_SETTINGS,   // brightness / volume / sleep-delay sliders; reached by swiping
+    SCREEN_SETTINGS,   // brightness / volume / sleep-delay sliders; toggled by tapping the logo
     SCREEN_APPROVAL,   // mirrors Claude Code's tool-permission prompt (display-only)
     SCREEN_COUNT,
 };

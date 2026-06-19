@@ -1,5 +1,8 @@
 #!/bin/bash
-# Take a screenshot from the Waveshare AMOLED display via LVGL snapshot.
+# Take a screenshot from the Waveshare AMOLED display.
+# PSRAM boards (S3) snapshot the LVGL framebuffer; PSRAM-free boards (C6)
+# stream the frame strip-by-strip. Either way the host receives contiguous
+# row-major RGB565, so this script handles both.
 # Usage: ./screenshot.sh [output.png] [port]
 # Default port: /dev/cu.usbmodem101 on macOS, /dev/ttyACM0 on Linux.
 
@@ -21,22 +24,21 @@ if ! python3 -c "import serial" 2>/dev/null; then
     fi
 fi
 
-TMPRAW=$(mktemp /tmp/screenshot_XXXXXX.raw)
-TMPDIMS=$(mktemp /tmp/screenshot_XXXXXX.dims)
-trap "rm -f '$TMPRAW' '$TMPDIMS'" EXIT
-
 echo "Taking screenshot from $PORT..."
 
-"$PY" - "$PORT" "$TMPRAW" "$TMPDIMS" << 'PYEOF'
-import serial, sys
+# Capture + RGB565->PNG happen in one python process. PNG is written with the
+# stdlib (struct + zlib), so no ffmpeg/Pillow dependency on the host.
+"$PY" - "$PORT" "$OUTPUT" << 'PYEOF'
+import serial, sys, struct, zlib
 
-port_path, raw_path, dims_path = sys.argv[1], sys.argv[2], sys.argv[3]
+port_path, out_path = sys.argv[1], sys.argv[2]
 
 port = serial.Serial(port_path, 115200, timeout=10)
 port.reset_input_buffer()
 port.write(b"screenshot\n")
 port.flush()
 
+w = h = raw_size = None
 while True:
     line = port.readline().decode("utf-8", errors="replace").strip()
     if line.startswith("SCREENSHOT_START"):
@@ -45,6 +47,9 @@ while True:
         break
     if line == "SCREENSHOT_ERR":
         print("Device reported screenshot error", file=sys.stderr)
+        sys.exit(1)
+    if line == "SCREENSHOT_UNSUPPORTED":
+        print("Device firmware reports screenshot unsupported on this board", file=sys.stderr)
         sys.exit(1)
 
 data = b""
@@ -55,33 +60,47 @@ while len(data) < raw_size:
         sys.exit(1)
     data += chunk
 
-with open(raw_path, "wb") as f:
-    f.write(data)
-with open(dims_path, "w") as f:
-    f.write(f"{w}x{h}\n")
-
 for _ in range(10):
-    line = port.readline().decode("utf-8", errors="replace").strip()
-    if line == "SCREENSHOT_END":
+    if port.readline().decode("utf-8", errors="replace").strip() == "SCREENSHOT_END":
         break
-
 port.close()
-print(f"Captured {w}x{h} ({len(data)} bytes)")
+
+# RGB565 little-endian -> RGB888 (bit replication keeps full-range channels).
+px = struct.unpack(f"<{w * h}H", data)
+rgb = bytearray(w * h * 3)
+i = 0
+for v in px:
+    r = (v >> 11) & 0x1F
+    g = (v >> 5) & 0x3F
+    b = v & 0x1F
+    rgb[i]     = (r << 3) | (r >> 2)
+    rgb[i + 1] = (g << 2) | (g >> 4)
+    rgb[i + 2] = (b << 3) | (b >> 2)
+    i += 3
+
+# Prefix each scanline with filter byte 0 (none), as PNG requires.
+stride = w * 3
+raw = bytearray()
+for y in range(h):
+    raw.append(0)
+    raw += rgb[y * stride:(y + 1) * stride]
+
+def png_chunk(tag, body):
+    c = tag + body
+    return struct.pack(">I", len(body)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+
+png = b"\x89PNG\r\n\x1a\n"
+png += png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))  # 8-bit truecolor
+png += png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+png += png_chunk(b"IEND", b"")
+
+with open(out_path, "wb") as f:
+    f.write(png)
+
+print(f"Saved: {out_path} ({w}x{h}, {len(data)} bytes raw)")
 PYEOF
 
 if [ $? -ne 0 ]; then
-    echo "Screenshot capture failed"
-    exit 1
-fi
-
-DIMS=$(cat "$TMPDIMS")
-ffmpeg -y -f rawvideo -pixel_format rgb565le -video_size "$DIMS" \
-    -i "$TMPRAW" -update 1 -frames:v 1 "$OUTPUT" 2>/dev/null || true
-
-
-if [ -f "$OUTPUT" ]; then
-    echo "Saved: $OUTPUT ($DIMS)"
-else
-    echo "Error: conversion failed"
+    echo "Screenshot failed"
     exit 1
 fi
