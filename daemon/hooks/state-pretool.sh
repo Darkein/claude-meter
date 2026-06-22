@@ -1,5 +1,5 @@
 #!/bin/bash
-# Clawdmeter PreToolUse hook (matcher "*"). Fires before a tool runs — and,
+# Claude Meter PreToolUse hook (matcher "*"). Fires before a tool runs — and,
 # per Claude Code's lifecycle, BEFORE any permission dialog (PreToolUse runs
 # ahead of the permission-mode check). So this is the "a tool is starting"
 # signal: it marks the session working and clears any stale pending dialog.
@@ -21,7 +21,7 @@ case "$TOOL" in AskUserQuestion|ExitPlanMode) exit 0 ;; esac   # let the asking 
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
 NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
 
-DIR="$HOME/.config/claude-usage-monitor/state"
+DIR="$HOME/.config/claude-meter/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"

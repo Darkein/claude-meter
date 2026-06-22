@@ -1,5 +1,5 @@
 #!/bin/bash
-# Clawdmeter ElicitationResult hook. Fires after the user answers an MCP
+# Claude Meter ElicitationResult hook. Fires after the user answers an MCP
 # elicitation dialog, before the response goes back to the server. The stdin
 # JSON carries .user_response.action (accept | decline | cancel).
 #
@@ -20,7 +20,7 @@ SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 0
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
 NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
-DIR="$HOME/.config/claude-usage-monitor/state"
+DIR="$HOME/.config/claude-meter/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"

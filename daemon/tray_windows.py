@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows system-tray entry and state bridge for Clawdmeter — APP-01.
+"""Windows system-tray entry and state bridge for Claude Meter — APP-01.
 
 Provides:
   TrayState   — thread-safe scalar bridge (daemon loop writes, tray reads)
@@ -116,7 +116,7 @@ def header_text(ts: TrayState) -> str:
 # autostart (HKCU\Run pythonw) and an ARSO-restored console instance live in the
 # same session, so this name catches the duplicate-launch collision that produced
 # the "mystery console window fighting the headless tray over BLE" field bug.
-_SINGLETON_MUTEX_NAME = "Local\\Clawdmeter-tray-singleton"
+_SINGLETON_MUTEX_NAME = "Local\\claude-meter-tray-singleton"
 _ERROR_ALREADY_EXISTS = 183
 
 
@@ -124,7 +124,7 @@ def _acquire_single_instance():
     """Acquire the process-wide single-instance lock.
 
     Returns a truthy handle to keep alive for the process lifetime if this is
-    the first/only tray, or None if another Clawdmeter tray already owns the
+    the first/only tray, or None if another Claude Meter tray already owns the
     lock (the caller must then exit immediately, before touching BLE).
 
     Uses a named kernel mutex: Windows releases it automatically when the owning
@@ -189,7 +189,7 @@ def main() -> None:
     images = build_state_icons(base)
 
     ts = TrayState()
-    icon = pystray.Icon("Clawdmeter", images["scanning"], "Clawdmeter")
+    icon = pystray.Icon("claude-meter", images["scanning"], "Claude Meter")
 
     # --- background thread: asyncio loop ---
     def _run_daemon() -> None:
@@ -263,7 +263,7 @@ def main() -> None:
                 _icon.title = header_text(ts)
                 # D-04: toast ONLY on transition INTO error, not on every error tick.
                 if current == "error" and prev_state["state"] != "error":
-                    _icon.notify(ts.reason or "Clawdmeter error", "Clawdmeter")
+                    _icon.notify(ts.reason or "Claude Meter error", "Claude Meter")
                 prev_state["state"] = current
                 prev_state["last_sync"] = last_sync
                 _icon.update_menu()

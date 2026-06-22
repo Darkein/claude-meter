@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.user.claude-usage-daemon</string>
+    <string>com.user.claude-meter</string>
 
     <key>ProgramArguments</key>
     <array>

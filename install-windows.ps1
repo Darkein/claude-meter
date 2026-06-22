@@ -1,4 +1,4 @@
-# install-windows.ps1 - Clawdmeter Windows turnkey bootstrap (D-09)
+# install-windows.ps1 - Claude Meter Windows turnkey bootstrap (D-09)
 #
 # Creates a Python virtual environment, installs dependencies from
 # daemon\requirements-windows.txt, registers the tray app to launch at login
@@ -11,7 +11,7 @@
 #   .\install-windows.ps1
 #
 # To disable autostart later: right-click the tray icon -> uncheck "Start at login"
-# Or remove manually: reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
+# Or remove manually: reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v claude-meter /f
 #
 # Security: this script downloads nothing from the internet. It installs only
 # the packages listed in the in-repo daemon\requirements-windows.txt.
@@ -30,7 +30,7 @@ if (-not $RepoRoot) {
     $RepoRoot = (Get-Location).Path
 }
 
-Log "=== Clawdmeter Windows Install ==="
+Log "=== Claude Meter Windows Install ==="
 Log "Repository root: $RepoRoot"
 
 # ------------------------------------------------------------------
@@ -45,15 +45,15 @@ if ($RepoRoot -match '\\\\wsl(\$|\.localhost)\\') {
 Refusing to install from a WSL path:
   $RepoRoot
 
-The Clawdmeter daemon must be WSL-independent. Installing from the WSL share
+The Claude Meter daemon must be WSL-independent. Installing from the WSL share
 would make the virtual environment and login-autostart entry point at a path
 that is unreachable once WSL shuts down.
 
 Fix: copy this repository to a native Windows location and run the installer
 there, e.g.
 
-  Copy-Item -Recurse '$RepoRoot' "$env:USERPROFILE\Clawdmeter"
-  cd "$env:USERPROFILE\Clawdmeter"
+  Copy-Item -Recurse '$RepoRoot' "$env:USERPROFILE\claude-meter"
+  cd "$env:USERPROFILE\claude-meter"
   powershell -ExecutionPolicy Bypass -File install-windows.ps1
 "@
 }
@@ -101,7 +101,7 @@ import daemon.autostart_windows as a
 a.enable(tray_script=r'$TrayScript')
 "@
 if ($LASTEXITCODE -ne 0) { throw "Autostart registration failed (exit $LASTEXITCODE)" }
-Log "Autostart registered - Clawdmeter will launch automatically at next logon"
+Log "Autostart registered - Claude Meter will launch automatically at next logon"
 
 # ------------------------------------------------------------------
 # Step 4: Launch the tray app (headless - BASE pythonw.exe, no console window)
@@ -121,5 +121,5 @@ $StartArgs = @{
     WorkingDirectory = $RepoRoot
 }
 Start-Process @StartArgs
-Log "Tray app started - look for the Clawdmeter icon in your notification area"
+Log "Tray app started - look for the Claude Meter icon in your notification area"
 Log "=== Install complete ==="

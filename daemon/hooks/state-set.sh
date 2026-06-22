@@ -1,5 +1,5 @@
 #!/bin/bash
-# Clawdmeter session-state hook (parameterised). $1 = the signal to record:
+# Claude Meter session-state hook (parameterised). $1 = the signal to record:
 #   working  — Claude is making progress (prompt submitted, tool started/ended,
 #              MCP elicitation accepted). Sets activity=working AND clears any
 #              pending dialog (a tool running / answer submitted resolves it).
@@ -41,7 +41,7 @@ SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 0
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
 NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
-DIR="$HOME/.config/claude-usage-monitor/state"
+DIR="$HOME/.config/claude-meter/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"

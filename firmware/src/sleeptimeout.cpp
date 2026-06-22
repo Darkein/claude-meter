@@ -14,7 +14,7 @@ static uint8_t cur_idx = DEFAULT_IDX;
 
 void sleeptimeout_init(void) {
     Preferences prefs;
-    prefs.begin("clawdmeter", true);
+    prefs.begin("claude-meter", true);
     uint8_t saved = prefs.getUChar("slp_idx", 0xFF);
     prefs.end();
 
@@ -28,7 +28,7 @@ void sleeptimeout_set(uint8_t idx) {
     cur_idx = idx;
 
     Preferences prefs;
-    prefs.begin("clawdmeter", false);
+    prefs.begin("claude-meter", false);
     prefs.putUChar("slp_idx", cur_idx);
     prefs.end();
 

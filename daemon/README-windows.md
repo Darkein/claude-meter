@@ -1,6 +1,6 @@
 # Windows Setup and Run Guide
 
-This guide covers running the Clawdmeter Windows daemon on native Windows hardware.
+This guide covers running the Claude Meter Windows daemon on native Windows hardware.
 It includes the turnkey `install-windows.ps1` bootstrap (tray icon + login autostart),
 the manual-run fallback, and how to manage or remove autostart.
 
@@ -13,7 +13,7 @@ the manual-run fallback, and how to manage or remove autostart.
 | **Native Windows** | Must run on real Windows — not WSL. The script prints a warning and BLE will not work under WSL. |
 | **Python 3.11+** | Download from [python.org](https://www.python.org/downloads/) if not already installed. Ensure "Add python.exe to PATH" is checked during install. |
 | **Claude Code installed** | Install Claude Code and complete `claude login` so credentials exist on disk. |
-| **Clawdmeter powered on** | The device must be powered on and in range before the daemon starts. |
+| **Claude Meter powered on** | The device must be powered on and in range before the daemon starts. |
 | **Paired with Windows Bluetooth** | Pair the device once via **Settings → Bluetooth & devices → Add device** (see [Pair the device](#pair-the-device-one-time)). This is required — the device is a bonded BLE HID keyboard, so pairing enables its physical buttons and keeps a persistent connection that shows your last usage even when the daemon is stopped. |
 
 ### Where are my credentials?
@@ -35,14 +35,14 @@ absolute path or `CLAUDE_CONFIG_DIR` to a directory to override the search entir
 
 ## Pair the device (one time)
 
-The Clawdmeter is a **bonded BLE HID keyboard** as well as a usage display — its firmware
+The Claude Meter is a **bonded BLE HID keyboard** as well as a usage display — its firmware
 enables bonding (`NimBLEDevice::setSecurityAuth`) and advertises the HID service so its
 physical buttons act as a keyboard (Space / Shift+Tab). Pair it with Windows **once**,
 before running the daemon:
 
 1. Put the device on its Bluetooth waiting screen (powered on, not yet connected).
 2. Open **Settings → Bluetooth & devices → Add device → Bluetooth**.
-3. Select **Clawdmeter** and complete pairing.
+3. Select **Claude Meter** and complete pairing.
 
 **Why this is required:**
 
@@ -93,7 +93,7 @@ This installs `bleak` (WinRT BLE) and `httpx` (async HTTP for the Anthropic API)
 
 ## Running the daemon
 
-With the venv active and the Clawdmeter powered on, run from the **repository root**:
+With the venv active and the Claude Meter powered on, run from the **repository root**:
 
 ```powershell
 python -m daemon
@@ -102,7 +102,7 @@ python -m daemon
 ### What's new in this release
 
 - **Single entry point.** `python -m daemon` replaces the old `daemon\claude_usage_daemon_windows.py` direct invocation. The module auto-selects the correct backend (Windows → WinRT BLE, macOS → CoreBluetooth, Linux → BlueZ).
-- **Device name unified.** Windows now scans for `"Clawdmeter"` (was `"Claude Controller"` — a bug that prevented discovery on Windows). No user action needed; discovery now works correctly.
+- **Device name unified.** Windows now scans for `"Claude Meter"` (was `"Claude Controller"` — a bug that prevented discovery on Windows). No user action needed; discovery now works correctly.
 - **Live Claude Code state.** Windows now receives the full live-state pipeline: working / idle / approval / question screens and the clock display. Requires Claude Code bash hooks installed (`daemon/install-hooks.sh` or the PowerShell equivalent). Without hooks the device shows usage bars only (falls back to `cs=3 NONE`).
 - **Reconnect timing.** The old 3-attempt connect retry + zombie-link break are replaced by the ping-keepalive + outer backoff model (same as macOS/Linux). Dead links are detected within one 5s TICK and reconnected within 1–60s backoff. This keeps well within the previous 120s SLA.
 
@@ -111,7 +111,7 @@ python -m daemon
 ```
 [HH:MM:SS] === Claude Usage Tracker Daemon (BLE) ===
 [HH:MM:SS] Poll interval: 60s
-[HH:MM:SS] Scanning for 'Clawdmeter' (8.0s)...
+[HH:MM:SS] Scanning for 'Claude Meter' (8.0s)...
 [HH:MM:SS] Found: XX:XX:XX:XX:XX:XX
 [HH:MM:SS] Connecting to XX:XX:XX:XX:XX:XX...
 [HH:MM:SS] Connected
@@ -142,7 +142,7 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `Warning: running under Linux/WSL` | Running in WSL, not native Windows | Run from a native PowerShell or Command Prompt on Windows |
-| `Scanning for 'Clawdmeter'… Device not found` | Clawdmeter is off, out of range, or not yet paired | Power on the device and pair it via Bluetooth settings |
+| `Scanning for 'Claude Meter'… Device not found` | Claude Meter is off, out of range, or not yet paired | Power on the device and pair it via Bluetooth settings |
 | `No token; skipping poll` | No credentials file found at any candidate path | Confirm `claude login` ran on this machine; check `%USERPROFILE%\.claude\.credentials.json` exists |
 | `API HTTP 401` | Token expired | Re-run `claude login` in a terminal to refresh the token, then restart the daemon |
 | `Connection failed` | WinRT BLE initialisation issue | Ensure Windows Bluetooth is on; try toggling Bluetooth off/on in Windows Settings |
@@ -154,15 +154,15 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 ### One-command install (recommended)
 
 > **Copy the repo to a native Windows path first.** Clone or copy this repository
-> to a Windows location such as `%USERPROFILE%\Clawdmeter` — **not** a WSL share
+> to a Windows location such as `%USERPROFILE%\claude-meter` — **not** a WSL share
 > (`\\wsl$\...` or `\\wsl.localhost\...`). Installing from the WSL share would point
 > the virtual environment and the login-autostart entry at a path that disappears when
 > WSL shuts down, defeating the whole point of the Windows daemon. The installer
 > detects a WSL path and refuses to run, telling you how to relocate.
 >
 > ```powershell
-> Copy-Item -Recurse '\\wsl.localhost\Ubuntu\home\<you>\repos\Clawdmeter' "$env:USERPROFILE\Clawdmeter"
-> cd "$env:USERPROFILE\Clawdmeter"
+> Copy-Item -Recurse '\\wsl.localhost\Ubuntu\home\<you>\repos\claude-meter' "$env:USERPROFILE\claude-meter"
+> cd "$env:USERPROFILE\claude-meter"
 > ```
 
 Run this once from the repository root in PowerShell (a native Windows path):
@@ -183,7 +183,7 @@ the in-repo `daemon\requirements-windows.txt`.
 
 ### Tray icon and status
 
-After install, the Clawdmeter icon appears in the Windows notification area:
+After install, the Claude Meter icon appears in the Windows notification area:
 
 | State | Icon bubble | Tooltip |
 |-------|-------------|---------|
@@ -211,7 +211,7 @@ Right-click the tray icon for the menu:
 Use the tray menu toggle, or remove the registry value manually:
 
 ```powershell
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v claude-meter /f
 ```
 
 ### WSL independence

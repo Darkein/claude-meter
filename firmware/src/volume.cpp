@@ -21,7 +21,7 @@ static uint8_t icon_bucket(uint8_t val) {
 
 void volume_init(void) {
     Preferences prefs;
-    prefs.begin("clawdmeter", true);
+    prefs.begin("claude-meter", true);
     uint16_t saved = prefs.getUShort("vol_val", 0xFFFF);
     prefs.end();
 
@@ -41,7 +41,7 @@ void volume_set(uint8_t val) {
     volume_preview(val);
 
     Preferences prefs;
-    prefs.begin("clawdmeter", false);
+    prefs.begin("claude-meter", false);
     prefs.putUShort("vol_val", cur_val);
     prefs.end();
 

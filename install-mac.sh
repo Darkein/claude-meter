@@ -1,19 +1,19 @@
 #!/bin/bash
-# macOS installer for Clawdmeter daemon (Python + bleak + launchd).
+# macOS installer for Claude Meter daemon (Python + bleak + launchd).
 # Mirrors install.sh but uses LaunchAgents instead of systemd user units.
 # Entry point: python -m daemon (runs daemon/__main__.py, selects MacOSBackend).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVICE_LABEL="com.user.claude-usage-daemon"
+SERVICE_LABEL="com.user.claude-meter"
 PLIST_SRC="$SCRIPT_DIR/daemon/$SERVICE_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
 LOG_DIR="$HOME/Library/Logs"
-LOG_OUT="$LOG_DIR/claude-usage-daemon.out.log"
-LOG_ERR="$LOG_DIR/claude-usage-daemon.err.log"
+LOG_OUT="$LOG_DIR/claude-meter.out.log"
+LOG_ERR="$LOG_DIR/claude-meter.err.log"
 
-echo "=== Clawdmeter macOS install ==="
+echo "=== Claude Meter macOS install ==="
 echo ""
 
 echo "[1/5] Checking prerequisites..."
@@ -78,11 +78,11 @@ echo ""
 echo "First-time Bluetooth pairing (after firmware is flashed):"
 echo "  1. Power on the device."
 echo "  2. Open System Settings → Bluetooth."
-echo "  3. Click 'Connect' next to 'Clawdmeter'."
+echo "  3. Click 'Connect' next to 'Claude Meter'."
 echo "  4. The daemon will discover it within ~30 s and start polling."
 echo ""
 echo "Useful commands:"
-echo "  launchctl list | grep claude-usage     # check it's running"
+echo "  launchctl list | grep claude-meter     # check it's running"
 echo "  tail -F $LOG_OUT                       # live logs"
 echo "  launchctl unload $PLIST_DST            # stop"
 echo "  launchctl load -w $PLIST_DST           # start"

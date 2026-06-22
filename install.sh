@@ -1,11 +1,11 @@
 #!/bin/bash
-# Linux installer for the Clawdmeter daemon (Python + bleak + systemd user unit).
+# Linux installer for the Claude Meter daemon (Python + bleak + systemd user unit).
 # Mirrors install-mac.sh but uses a systemd --user service instead of launchd.
 # Entry point: python -m daemon (runs daemon/__main__.py, selects LinuxBackend).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVICE_NAME="claude-usage-daemon"
+SERVICE_NAME="claude-meter"
 SERVICE_FILE="$SCRIPT_DIR/daemon/$SERVICE_NAME.service"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
@@ -51,13 +51,13 @@ systemctl --user enable "$SERVICE_NAME"
 echo ""
 echo "=== Done! ==="
 echo ""
-echo "The daemon starts automatically at login and connects to 'Clawdmeter'"
+echo "The daemon starts automatically at login and connects to 'Claude Meter'"
 echo "over Bluetooth Low Energy."
 echo ""
 echo "First-time Bluetooth pairing:"
 echo "  1. Power on the device."
 echo "  2. Run: bluetoothctl scan le"
-echo "  3. Find 'Clawdmeter' and note the MAC address."
+echo "  3. Find 'Claude Meter' and note the MAC address."
 echo "  4. Run: bluetoothctl pair <MAC> && bluetoothctl trust <MAC>"
 echo "  5. Start the daemon: systemctl --user start $SERVICE_NAME"
 echo ""

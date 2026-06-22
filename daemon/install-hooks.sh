@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the Clawdmeter Claude Code hooks: copy the hook scripts into the
+# Install the Claude Meter Claude Code hooks: copy the hook scripts into the
 # daemon config dir and additively merge the hook entries into
 # ~/.claude/settings.json (existing hooks are preserved). Idempotent, and
 # upgrades cleanly from older installs (drops the previous script set first).
@@ -54,7 +54,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"        # .../daemon
 HOOK_SRC="$SCRIPT_DIR/hooks"
-HOOK_DST="$HOME/.config/claude-usage-monitor/hooks"
+HOOK_DST="$HOME/.config/claude-meter/hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
 command -v jq >/dev/null || { echo "Error: jq is required to merge settings.json"; exit 1; }
@@ -79,10 +79,10 @@ END="$HOOK_DST/state-end.sh"
 
 mkdir -p "$(dirname "$SETTINGS")"
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-cp "$SETTINGS" "$SETTINGS.clawdmeter.bak"
-echo "  Backed up settings.json -> $SETTINGS.clawdmeter.bak"
+cp "$SETTINGS" "$SETTINGS.claude-meter.bak"
+echo "  Backed up settings.json -> $SETTINGS.claude-meter.bak"
 
-# Additive merge. strip() removes any prior Clawdmeter entry (current OR legacy
+# Additive merge. strip() removes any prior Claude Meter entry (current OR legacy
 # script paths) from a group, leaving third-party hooks (e.g. sound) untouched,
 # then we re-add our entries. clean() drops a now-empty event group entirely.
 jq \
@@ -156,6 +156,6 @@ jq \
   | .hooks.SessionEnd = ((.hooks.SessionEnd // []) | strip)
     + [ {matcher:"", hooks:[ {type:"command", command:$end} ]} ]
   ' \
-  "$SETTINGS.clawdmeter.bak" > "$SETTINGS"
+  "$SETTINGS.claude-meter.bak" > "$SETTINGS"
 
-echo "  Merged Clawdmeter hooks into $SETTINGS"
+echo "  Merged Claude Meter hooks into $SETTINGS"

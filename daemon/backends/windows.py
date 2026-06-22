@@ -31,11 +31,11 @@ def _build_file_logger() -> "logging.Logger | None":
     """
     if sys.platform != "win32":
         return None
-    logger = logging.getLogger("clawdmeter.daemon")
+    logger = logging.getLogger("claude-meter.daemon")
     if logger.handlers:
         return logger  # idempotent across re-import (tray imports this module)
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    path = base / "Clawdmeter" / "daemon.log"
+    path = base / "claude-meter" / "daemon.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(

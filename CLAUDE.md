@@ -153,13 +153,13 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Python daemon (`daemon/claude_usage_daemon.py`, run via bleak) is the single cross-platform daemon: reads the OAuth token (macOS Keychain / `~/.claude/.credentials.json`), polls the Anthropic API, AND drives the live Claude Code state pipeline from the hook state files. macOS uses launchd (`install-mac.sh`), Linux uses a systemd user unit (`install.sh` → `systemctl --user start claude-usage-daemon`); both render `ExecStart` to `<venv>/bin/python …/claude_usage_daemon.py`. Windows: `claude_usage_daemon_windows.py`. (The old bash daemon was usage-only and has been removed.)
+Python daemon (`daemon/claude_usage_daemon.py`, run via bleak) is the single cross-platform daemon: reads the OAuth token (macOS Keychain / `~/.claude/.credentials.json`), polls the Anthropic API, AND drives the live Claude Code state pipeline from the hook state files. macOS uses launchd (`install-mac.sh`), Linux uses a systemd user unit (`install.sh` → `systemctl --user start claude-meter`); both render `ExecStart` to `<venv>/bin/python …/claude_usage_daemon.py`. Windows: `claude_usage_daemon_windows.py`. (The old bash daemon was usage-only and has been removed.)
 
 **Discovery & resilience:**
 
-- Connects by name (`"Clawdmeter"`); Linux caches the resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
+- Connects by name (`"Claude Meter"`); Linux caches the resolved MAC at `~/.config/claude-meter/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
 - On connect failure: Linux drops the cached address; macOS skips the stale CoreBluetooth handle one cycle so the scan fallback is reachable. Exponential backoff 1→60s, reset on success.
-- Single-instance flock at `~/.config/claude-usage-monitor/daemon.lock` (two daemons would fight over the one BLE link).
+- Single-instance flock at `~/.config/claude-meter/daemon.lock` (two daemons would fight over the one BLE link).
 - `POLL_INTERVAL=60`, `TICK=5`. `poll_loop` polls when 60s elapsed OR the ESP fires a refresh; `watch_loop` (watchfiles) pushes on every hook-state change.
 
 **GATT characteristics on service `4c41555a-...0001`:**

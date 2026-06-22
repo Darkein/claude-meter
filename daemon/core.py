@@ -25,7 +25,7 @@ from watchfiles import awatch
 # Constants
 # ---------------------------------------------------------------------------
 
-DEVICE_NAME = "Clawdmeter"
+DEVICE_NAME = "Claude Meter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"  # readable; used as link-liveness probe
@@ -39,7 +39,7 @@ SCAN_TIMEOUT = 8.0
 
 # Live Claude Code state: hooks write per-session files here; the daemon watches
 # the dir and translates them into the BLE payload. See daemon/hooks/.
-STATE_DIR = Path.home() / ".config" / "claude-usage-monitor" / "state"
+STATE_DIR = Path.home() / ".config" / "claude-meter" / "state"
 STATE_STALE_S = 120       # an activity value (working/idle) older than this is ignored (crashed session).
 DIALOG_MIN_AGE_S = 2.5    # a "waiting" dialog must be this old before it counts (debounce auto-grants).
 DIALOG_STALE_S = 45       # a dialog (waiting/asking) older than this is ignored. No hook fires on

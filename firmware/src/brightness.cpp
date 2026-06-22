@@ -21,7 +21,7 @@ static uint8_t clamp_val(uint8_t v) {
 
 void brightness_init(void) {
     Preferences prefs;
-    prefs.begin("clawdmeter", true);
+    prefs.begin("claude-meter", true);
     uint16_t saved = prefs.getUShort("brt_val", 0xFFFF);
     prefs.end();
 
@@ -39,7 +39,7 @@ void brightness_set(uint8_t val) {
     brightness_preview(val);
 
     Preferences prefs;
-    prefs.begin("clawdmeter", false);
+    prefs.begin("claude-meter", false);
     prefs.putUShort("brt_val", cur_val);
     prefs.end();
     Serial.printf("Brightness set: val=%u\n", cur_val);

@@ -1,6 +1,6 @@
 """One-shot BLE OTA firmware push.
 
-Streams a firmware .bin to a connected Clawdmeter over the OTA characteristic,
+Streams a firmware .bin to a connected Claude Meter over the OTA characteristic,
 then exits. Reuses the platform backend's discovery + client creation so it
 behaves identically to the main daemon's connect path.
 

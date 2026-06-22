@@ -1,7 +1,7 @@
-"""Login-autostart toggle for Clawdmeter — APP-01 / D-07.
+"""Login-autostart toggle for Claude Meter — APP-01 / D-07.
 
 Manages a per-user HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
-registry value named "Clawdmeter" that launches the tray app headlessly via
+registry value named "claude-meter" that launches the tray app headlessly via
 pythonw.exe (no console window — D-08).
 
 winreg is Windows stdlib; this module guards the import so it can be imported
@@ -27,7 +27,7 @@ except ImportError:
 
 # Registry key (no leading backslash — OpenKey uses relative path under hive).
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_VALUE_NAME = "Clawdmeter"
+_VALUE_NAME = "claude-meter"
 
 
 def log(msg: str) -> None:

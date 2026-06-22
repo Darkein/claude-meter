@@ -1,4 +1,4 @@
-# Windows-only dependency manifest for the Clawdmeter daemon.
+# Windows-only dependency manifest for the Claude Meter daemon.
 # The macOS/Linux daemon uses requirements.txt.
 bleak
 httpx

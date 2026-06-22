@@ -43,7 +43,7 @@ items are fixed, strike them through and link the commit/PR.
 
 ### BLE / data (`ble.*`, `data.h`)
 
-- NimBLE peripheral "Clawdmeter", service `4c41555a-…0001`, max 2 connections.
+- NimBLE peripheral "Claude Meter", service `4c41555a-…0001`, max 2 connections.
 - RX(0002) host→device JSON; TX(0003) device ack/nack notify; REQ(0004) device-initiated refresh on
   subscribe when no data yet.
 - State machine INIT/ADVERTISING/CONNECTED/DISCONNECTED; re-advertises to fill the 2nd slot (OS HID +
@@ -70,13 +70,13 @@ items are fixed, strike them through and link the commit/PR.
   Anthropic poll (haiku dummy call, rate-limit headers → payload), CoreBluetooth connected-peripheral
   recovery, file-watch of hook state, payload dedup, single-instance flock, async backoff loop.
 - **`claude_usage_daemon_windows.py`**: bleak + tray + autostart.
-- **`claude-usage-daemon.sh`** (legacy Linux/D-Bus): bluetoothctl discovery, MAC cache, busctl GATT
+- **`claude-meter.sh`** (legacy Linux/D-Bus): bluetoothctl discovery, MAC cache, busctl GATT
   write, dbus-monitor REQ subscribe.
 
 #### Claude Code live-state pipeline (headline feature — terminal activity → device screen)
 
 - **4 hooks** (`daemon/hooks/*.sh`), each reads hook JSON on stdin and writes an atomic per-session
-  `~/.config/claude-usage-monitor/state/<sid>.json` (`jq … > tmp && mv`):
+  `~/.config/claude-meter/state/<sid>.json` (`jq … > tmp && mv`):
   - `state-set.sh <state>` — parametrised working/idle/asking writer (turn start, tool end, MCP
     elicitation answered, AskUserQuestion PreToolUse → asking).
   - `state-perm.sh` — **PermissionRequest** → `{state:waiting, tool, detail, ts}`. **Always `exit 1`**
@@ -109,7 +109,7 @@ items are fixed, strike them through and link the commit/PR.
   Firmware also has `ble_send_approval(sid, approve)` ([ble.cpp:198](../firmware/src/ble.cpp)) that
   notifies an Allow/Deny back over TX — **but the daemon never consumes it** (observe-only by design).
   Half-built remote-approval (see I3).
-- **Parity gap**: the legacy bash daemon (`claude-usage-daemon.sh`) has **no live-state pipeline at all**
+- **Parity gap**: the legacy bash daemon (`claude-meter.sh`) has **no live-state pipeline at all**
   — usage only (`{s,sr,w,wr,st,ok}`). Linux users on it silently get no approval screen / working-idle
   states. The Python daemon (runs on Linux too via bleak) is the only full implementation.
 
@@ -143,7 +143,7 @@ All actionable items fixed; firmware builds on all 3 envs, scripts syntax-checke
 | I1 raise latency tuning | ⏸ not done | same as P2.4 |
 | I2 explicit dialog clear | ✅ done | `state-set.sh` deletes a waiting/asking file on an idle signal |
 | I3 remote approval | ✅ deleted | `ble_send_approval` + TX path removed (dead code) |
-| I4 legacy bash daemon | ✅ deleted | `claude-usage-daemon.sh` removed; `install.sh` now provisions the Python daemon |
+| I4 legacy bash daemon | ✅ deleted | `claude-meter.sh` removed; `install.sh` now provisions the Python daemon |
 | I5 event channel | ❌ rejected | keep disk-as-truth |
 | I6 richer payload | ⏸ not done | product direction |
 | P3 stale docs | ✅ fixed | README device name, ui.h/data.h comments, CLAUDE.md daemon section |
@@ -234,7 +234,7 @@ reliance or extend the feature.
 - **`approval_count` display unbounded** — `data.h` int, rendered as "N / M". Cap display at 99.
 - **Layout magic numbers hardcoded** — `ui.cpp` margins/positions inline; only 2 breakpoints. Known
   limitation for custom-board porters (partly acknowledged in porting docs).
-- **Legacy bash daemon lacks `set -euo pipefail`** — `claude-usage-daemon.sh:1`. Low priority (python
+- **Legacy bash daemon lacks `set -euo pipefail`** — `claude-meter.sh:1`. Low priority (python
   daemon is primary); harden or mark deprecated if still shipped (see I4).
 
 ---
@@ -242,7 +242,7 @@ reliance or extend the feature.
 ## Filtered out (explorer false positives — do NOT chase)
 
 - ~~Bash `find_char_path_by_uuid` subshell loses output~~ — **false**: `echo` propagates through function
-  stdout to `req_path=$(…)` at `claude-usage-daemon.sh:148`. Works.
+  stdout to `req_path=$(…)` at `claude-meter.sh:148`. Works.
 - ~~Bash `$bytes` unquoted = shell injection~~ — **false**: intentional word-split for the `ay` byte array;
   bytes are always `0xNN`, no metacharacters. Quoting would break it.
 - ~~BLE `memcpy(rx_buf, val.c_str(), len)` overflow~~ — **false**: `std::string` is null-terminated and

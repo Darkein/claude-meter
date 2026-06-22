@@ -4,19 +4,12 @@
 > It tracks all of the original's functionality and adds a clock screen, a settings
 > screen, a live Claude Code state line, an approval screen that mirrors tool-permission
 > prompts, audio chimes + volume control, light-sleep power saving, over-the-air firmware
-> updates, and a rewritten cross-platform host daemon. The BLE device still advertises as
-> `Clawdmeter`, so the pairing and daemon flow are unchanged. Full credit for the original
-> project and the bulk of the firmware goes upstream.
+> updates, and a rewritten cross-platform host daemon. The BLE device advertises as
+> `Claude Meter`. Full credit for the original project and the bulk of the firmware goes upstream.
 
 A small ESP32 dashboard for your desk that keeps an eye on your Claude Code usage **and**
 the live state of your sessions. It pairs over Bluetooth Low Energy to a host daemon that
 polls the Anthropic API for usage and feeds Claude Code's session state to the display.
-
-|              Usage meter              |          Idle Clawd animation          |
-| :-----------------------------------: | :------------------------------------: |
-| ![Usage meter](screenshots/usage.png) | ![Clawd animation](assets/demo.gif) |
-
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites — check it out, it's lovely.
 
 ## Features
 
@@ -48,23 +41,23 @@ The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaa
 Everything is built from one codebase; a few features depend on hardware that only some boards
 have (a speaker, a hardware RTC, a second button, PSRAM).
 
-| Feature | 2.16″ S3 | 2.16″ C6 | 1.8″ S3 |
-| --- | :---: | :---: | :---: |
-| Usage meter (5h + weekly) | ✅ | ✅ | ✅ |
-| Live Claude Code state + status line | ✅ | ✅ | ✅ |
-| Approval screen (permission mirror) | ✅ | ✅ | ✅ |
-| Clock screen (swipe) | ✅ | ✅ | ✅ |
-| Offline clock (hardware RTC) | — | ✅ | — |
-| Settings (brightness / sleep delay) | ✅ | ✅ | ✅ |
-| Audio chimes | — | ✅ | — |
-| Volume control | — | ✅ | — |
-| Light-sleep power saving | ✅ | ✅ | ✅ |
-| OTA firmware update (over BLE) | ✅ | ✅ | ✅ |
-| Battery gauge | ✅ | ✅ | ✅ |
-| IMU auto-rotation | ✅ | ✅ | — (fixed portrait) |
-| Secondary button | ✅ | ✅ | — (single button) |
-| Screenshot via `screenshot.sh` | ✅ (snapshot) | ✅ (streamed) | ✅ (snapshot) |
-| PSRAM | ✅ | — | ✅ |
+| Feature                              |   2.16″ S3   |   2.16″ C6   |      1.8″ S3       |
+| ------------------------------------ | :----------: | :----------: | :----------------: |
+| Usage meter (5h + weekly)            |      ✅       |      ✅       |         ✅          |
+| Live Claude Code state + status line |      ✅       |      ✅       |         ✅          |
+| Approval screen (permission mirror)  |      ✅       |      ✅       |         ✅          |
+| Clock screen (swipe)                 |      ✅       |      ✅       |         ✅          |
+| Offline clock (hardware RTC)         |      —       |      ✅       |         —          |
+| Settings (brightness / sleep delay)  |      ✅       |      ✅       |         ✅          |
+| Audio chimes                         |      —       |      ✅       |         —          |
+| Volume control                       |      —       |      ✅       |         —          |
+| Light-sleep power saving             |      ✅       |      ✅       |         ✅          |
+| OTA firmware update (over BLE)       |      ✅       |      ✅       |         ✅          |
+| Battery gauge                        |      ✅       |      ✅       |         ✅          |
+| IMU auto-rotation                    |      ✅       |      ✅       | — (fixed portrait) |
+| Secondary button                     |      ✅       |      ✅       | — (single button)  |
+| Screenshot via `screenshot.sh`       | ✅ (snapshot) | ✅ (streamed) |    ✅ (snapshot)    |
+| PSRAM                                |      ✅       |      —       |         ✅          |
 
 ## Screens
 
@@ -73,14 +66,14 @@ any pending Approval and back. **Tap the logo** (top-left) to open Settings. The
 screen is raised automatically whenever Claude Code is waiting on a permission prompt, and
 drops back when the prompt is resolved.
 
-|              Usage              |              Clock              |
-| :-----------------------------: | :-----------------------------: |
-| ![Usage](screenshots/usage.png) | ![Clock](screenshots/clock.png) |
+|                   Usage                   |                   Clock                    |
+| :---------------------------------------: | :----------------------------------------: |
+|      ![Usage](screenshots/usage.png)      |      ![Clock](screenshots/clock.png)       |
 | 5h + weekly utilization, live status line | Wall-clock, date, battery (swipe to reach) |
 
-|              Settings              |              Approval              |
-| :--------------------------------: | :--------------------------------: |
-| ![Settings](screenshots/settings.png) | ![Approval](screenshots/approval.png) |
+|                      Settings                      |                Approval                 |
+| :------------------------------------------------: | :-------------------------------------: |
+|       ![Settings](screenshots/settings.png)        |  ![Approval](screenshots/approval.png)  |
 | Brightness / volume / sleep sliders (tap the logo) | Mirrors a Claude Code permission prompt |
 
 When the device has no fresh data it shows an idle sleeping-Clawd animation; while disconnected
@@ -152,31 +145,31 @@ register the hooks for you.
 ```
 
 Creates a venv in `daemon/.venv/`, installs the Claude Code hooks, renders a LaunchAgent into
-`~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is
+`~/Library/LaunchAgents/com.user.claude-meter.plist`, and loads it. The first run is
 launched interactively so macOS prompts for Bluetooth permission. The token is read from the
 Keychain (service `Claude Code-credentials`).
 
-Pair the device: **System Settings → Bluetooth**, click *Connect* next to "Clawdmeter" (the
+Pair the device: **System Settings → Bluetooth**, click *Connect* next to "Claude Meter" (the
 daemon discovers it on its next scan, ~30 s).
 
 ```bash
-launchctl list | grep claude-usage                                          # check it's running
-tail -F ~/Library/Logs/claude-usage-daemon.out.log                          # live logs
-launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # stop
-launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
+launchctl list | grep claude-meter                                          # check it's running
+tail -F ~/Library/Logs/claude-meter.out.log                          # live logs
+launchctl unload ~/Library/LaunchAgents/com.user.claude-meter.plist  # stop
+launchctl load -w ~/Library/LaunchAgents/com.user.claude-meter.plist # start
 ```
 
 ### Linux
 
 ```bash
 ./install.sh
-systemctl --user start claude-usage-daemon
+systemctl --user start claude-meter
 ```
 
 Creates the venv, installs the hooks, and renders a systemd user unit. The token is read from
 `~/.claude/.credentials.json`.
 
-Pair the device once (it advertises as "Clawdmeter"):
+Pair the device once (it advertises as "Claude Meter"):
 
 ```bash
 bluetoothctl scan le
@@ -185,8 +178,8 @@ bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
 ```bash
-systemctl --user status claude-usage-daemon   # status
-journalctl --user -u claude-usage-daemon -f    # logs
+systemctl --user status claude-meter   # status
+journalctl --user -u claude-meter -f    # logs
 ```
 
 ### Windows
@@ -205,20 +198,20 @@ powershell -ExecutionPolicy Bypass -File install-windows.ps1
 This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements,
 registers a per-user login-autostart entry (`HKCU\…\Run`, no admin), and launches the tray app.
 
-Pair the device: **Settings → Bluetooth & devices → Add device → Bluetooth → "Clawdmeter"**. The
+Pair the device: **Settings → Bluetooth & devices → Add device → Bluetooth → "Claude Meter"**. The
 tray icon's corner bubble shows state (green = connected, amber = scanning, red = error); right-click
 for status, a *Start at login* toggle, and *Quit*.
 
 ```powershell
-Get-Content $env:LOCALAPPDATA\Clawdmeter\daemon.log -Tail 30                       # logs
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f   # remove autostart
+Get-Content $env:LOCALAPPDATA\claude-meter\daemon.log -Tail 30                       # logs
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v claude-meter /f   # remove autostart
 ```
 
-| Symptom | Fix |
-|---------|-----|
-| `Device not found` | Power on the device; make sure it's in range and paired. |
-| `token expired` / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
-| `Connection failed` | Toggle Bluetooth off/on. |
+| Symptom                          | Fix                                                      |
+| -------------------------------- | -------------------------------------------------------- |
+| `Device not found`               | Power on the device; make sure it's in range and paired. |
+| `token expired` / `API HTTP 401` | Re-run `claude login`, then restart the daemon.          |
+| `Connection failed`              | Toggle Bluetooth off/on.                                 |
 
 ## OTA updates
 
@@ -227,8 +220,8 @@ first** (it and the OTA pusher would fight over the single BLE link), then push:
 
 ```bash
 # Stop the daemon
-systemctl --user stop claude-usage-daemon                                          # Linux
-launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist         # macOS
+systemctl --user stop claude-meter                                          # Linux
+launchctl unload ~/Library/LaunchAgents/com.user.claude-meter.plist         # macOS
 
 # Build (USB not needed) and push the image over BLE
 python -m daemon --ota firmware/.pio/build/waveshare_amoled_216_c6/firmware.bin --board waveshare_amoled_216_c6
@@ -259,11 +252,11 @@ for the wire protocol.
 
 The physical buttons control the device locally (this fork does **not** act as a BLE HID keyboard).
 
-| Button | 2.16″ S3 | 2.16″ C6 | 1.8″ S3 |
-| --- | --- | --- | --- |
-| **Primary** (BOOT) | Cycle brightness | Cycle brightness | Cycle brightness |
-| **Secondary** (KEY) | Cycle volume\* | Cycle chime volume | — (no second button) |
-| **Power** (PWR) | Tap: screen on/off · Hold 3 s + release: pairing | same | same |
+| Button              | 2.16″ S3                                         | 2.16″ C6           | 1.8″ S3              |
+| ------------------- | ------------------------------------------------ | ------------------ | -------------------- |
+| **Primary** (BOOT)  | Cycle brightness                                 | Cycle brightness   | Cycle brightness     |
+| **Secondary** (KEY) | Cycle volume\*                                   | Cycle chime volume | — (no second button) |
+| **Power** (PWR)     | Tap: screen on/off · Hold 3 s + release: pairing | same               | same                 |
 
 \* The 2.16″ S3 has no speaker, so its secondary button cycles a volume that has no audible effect.
 
@@ -271,14 +264,14 @@ The physical buttons control the device locally (this fork does **not** act as a
 
 The device exposes one custom GATT service:
 
-|                            | UUID                                   |
-| -------------------------- | -------------------------------------- |
-| **Data Service**           | `4c41555a-4465-7669-6365-000000000001` |
-| RX  (write)  — usage+state | `4c41555a-4465-7669-6365-000000000002` |
-| TX  (notify) — ack / OTA status | `4c41555a-4465-7669-6365-000000000003` |
+|                                          | UUID                                   |
+| ---------------------------------------- | -------------------------------------- |
+| **Data Service**                         | `4c41555a-4465-7669-6365-000000000001` |
+| RX  (write)  — usage+state               | `4c41555a-4465-7669-6365-000000000002` |
+| TX  (notify) — ack / OTA status          | `4c41555a-4465-7669-6365-000000000003` |
 | REQ (notify) — device asks for a refresh | `4c41555a-4465-7669-6365-000000000004` |
-| OTA (write)  — firmware frames | `4c41555a-4465-7669-6365-000000000005` |
-| INFO (read)  — board id + fw version | `4c41555a-4465-7669-6365-000000000006` |
+| OTA (write)  — firmware frames           | `4c41555a-4465-7669-6365-000000000005` |
+| INFO (read)  — board id + fw version     | `4c41555a-4465-7669-6365-000000000006` |
 
 The daemon merges usage and live state into one compact JSON object written to RX (short keys to
 fit the BLE MTU; unknown keys ignored, missing keys keep defaults):

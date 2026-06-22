@@ -80,7 +80,7 @@ daemon first** (it holds the single-instance lock + a BLE connection slot):
 # macOS
 launchctl stop com.claude.usage-monitor      # or: kill the daemon
 # Linux
-systemctl --user stop claude-usage-daemon
+systemctl --user stop claude-meter
 ```
 
 Then build + push in one step:

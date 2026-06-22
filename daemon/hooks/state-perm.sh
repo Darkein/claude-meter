@@ -1,5 +1,5 @@
 #!/bin/bash
-# Clawdmeter PermissionRequest hook. Fires whenever Claude Code shows a tool
+# Claude Meter PermissionRequest hook. Fires whenever Claude Code shows a tool
 # permission dialog (Allow / Allow-always / No) — for EVERY prompt, focused or
 # not, unlike Notification:permission_prompt which only fires when the OS emits
 # a notification (window unfocused). Sets dialog=waiting with the tool name so
@@ -50,7 +50,7 @@ DETAIL=$(printf '%s' "$IN" | jq -r '
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')
 NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
 
-DIR="$HOME/.config/claude-usage-monitor/state"
+DIR="$HOME/.config/claude-meter/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"

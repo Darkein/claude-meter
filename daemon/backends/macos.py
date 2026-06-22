@@ -65,7 +65,7 @@ class MacOSBackend(Backend):
         return MacOSBackend._cb_manager
 
     async def _retrieve_connected(self, skip_addr=None):
-        """Return a BLEDevice for a system-connected Clawdmeter, or None.
+        """Return a BLEDevice for a system-connected Claude Meter, or None.
 
         Two-step lookup, strongest signal first:
 

@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // Seconds taken per 1% of fuel-gauge movement, EMA-smoothed and persisted.
-// 0 = not learned yet. Keys live in the shared "clawdmeter" NVS namespace.
+// 0 = not learned yet. Keys live in the shared "claude-meter" NVS namespace.
 static uint16_t spp_dis = 0; // discharge: seconds per 1% drop
 static uint16_t spp_chg = 0; // charge:    seconds per 1% rise
 
@@ -18,14 +18,14 @@ static bool     last_on_power = false;
 
 static void persist(const char *key, uint16_t v) {
     Preferences prefs;
-    prefs.begin("clawdmeter", false);
+    prefs.begin("claude-meter", false);
     prefs.putUShort(key, v);
     prefs.end();
 }
 
 void battery_estimate_init(void) {
     Preferences prefs;
-    prefs.begin("clawdmeter", true);
+    prefs.begin("claude-meter", true);
     spp_dis = prefs.getUShort("bat_spd", 0);
     spp_chg = prefs.getUShort("bat_spc", 0);
     prefs.end();

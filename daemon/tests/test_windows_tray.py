@@ -201,7 +201,7 @@ def test_error_toast_on_entry_only():
         current = ts.state
         if current != prev_state["state"]:
             if current == "error" and prev_state["state"] != "error":
-                mock_icon.notify(ts.reason or "Clawdmeter error", "Clawdmeter")
+                mock_icon.notify(ts.reason or "Claude Meter error", "Claude Meter")
             prev_state["state"] = current
 
     # Transition 1: scanning -> error  (notify should fire)
@@ -211,7 +211,7 @@ def test_error_toast_on_entry_only():
     _process_state_change("error", "token expired — run claude login")
 
     mock_icon.notify.assert_called_once_with(
-        "token expired — run claude login", "Clawdmeter"
+        "token expired — run claude login", "Claude Meter"
     )
 
 

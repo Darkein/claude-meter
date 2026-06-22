@@ -6,7 +6,7 @@
 #include "version.h"
 #include "hal/board_caps.h"
 
-#define DEVICE_NAME "Clawdmeter"
+#define DEVICE_NAME "Claude Meter"
 
 // Custom GATT UUIDs for data channel
 #define SERVICE_UUID        "4c41555a-4465-7669-6365-000000000001"
@@ -38,7 +38,7 @@ static void start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->reset();
     // Primary advertising packet: flags + device name only. The host daemon
-    // discovers the device by name ("Clawdmeter"), so that's all we need.
+    // discovers the device by name ("Claude Meter"), so that's all we need.
     adv->setName(DEVICE_NAME);
     // Scan response carries the 128-bit custom data-service UUID for active
     // scanners (the host daemon scans actively).

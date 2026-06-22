@@ -16,7 +16,7 @@ def test_state_fields_empty_dir_returns_none_status(tmp_path, monkeypatch):
     assert out["cs"] == 3 and out["aq"] == 0 and out["q"] == []
 
 def test_device_name_unified():
-    assert core.DEVICE_NAME == "Clawdmeter"
+    assert core.DEVICE_NAME == "Claude Meter"
 
 def test_core_has_session_waitfirst_nextbackoff():
     assert hasattr(core, "Session")

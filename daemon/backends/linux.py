@@ -20,7 +20,7 @@ class LinuxBackend(Backend):
     name = "linux"
 
     def __init__(self) -> None:
-        self._addr_file = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
+        self._addr_file = Path.home() / ".config" / "claude-meter" / "ble-address"
 
     def read_token(self) -> str | None:
         try:
