@@ -30,6 +30,8 @@ SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"  # readable; used as link-liveness probe
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+OTA_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"   # firmware frames written here
+INFO_CHAR_UUID = "4c41555a-4465-7669-6365-000000000006"  # board id + fw version (read)
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -265,7 +267,8 @@ def _claude_state_fields() -> dict:
     any_idle = False      # any fresh session is paused/finished
     asking_kind: str | None = None   # kind of the most-recent fresh "asking"
     asking_ts = -1.0
-    waiting: list[tuple[float, str, str, str]] = []
+    asking_name = ""                 # project folder of that "asking" session
+    waiting: list[tuple[float, str, str, str, str]] = []
     live_waiting_sids: set[str] = set()
 
     try:
@@ -309,11 +312,13 @@ def _claude_state_fields() -> dict:
                     if seen >= WAITING_STABLE_READS:
                         waiting.append((dialog_ts, sid,
                                         str(d.get("tool", ""))[:15],
-                                        str(d.get("detail", ""))[:60]))
+                                        str(d.get("detail", ""))[:60],
+                                        str(d.get("name", ""))[:20]))
         elif dialog == "asking" and now - dialog_ts <= DIALOG_STALE_S:
             if dialog_ts > asking_ts:
                 asking_ts = dialog_ts
                 asking_kind = str(d.get("kind") or "question")
+                asking_name = str(d.get("name", ""))[:20]
 
         # --- activity (fallback when no dialog wins) ---
         # Working dominates idle across concurrent sessions: the aggregate is
@@ -336,8 +341,8 @@ def _claude_state_fields() -> dict:
 
     waiting.sort(key=lambda x: x[0])
     if waiting:
-        q = [{"tn": tool, "td": detail}
-             for (_, _sid, tool, detail) in waiting[:MAX_Q]]
+        q = [{"tn": tool, "td": detail, "sn": name}
+             for (_, _sid, tool, detail, name) in waiting[:MAX_Q]]
         return {
             "cs": 2,
             "aq": len(waiting),
@@ -346,7 +351,8 @@ def _claude_state_fields() -> dict:
         }
     if asking_kind is not None:
         tn = _ASK_KIND_TO_TOOL.get(asking_kind, "AskUserQuestion")
-        return {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": ""}], "_queue": []}
+        return {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": "", "sn": asking_name}],
+                "_queue": []}
     return {"cs": activity, "aq": 0, "q": [], "_queue": []}
 
 
@@ -380,6 +386,14 @@ class Session:
 
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
+        # The device RX buffer is 512 B and silently truncates a longer write
+        # (-> JSON parse fails). Session names ("sn") are a nice-to-have; drop
+        # them first so usage + state always get through under the worst-case
+        # full approval queue.
+        if len(data) > 500 and payload.get("q"):
+            for entry in payload["q"]:
+                entry.pop("sn", None)
+            data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)

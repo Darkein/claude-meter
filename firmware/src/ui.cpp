@@ -13,6 +13,7 @@
 #include "volume.h"
 #include "sleeptimeout.h"
 #include "battery_estimate.h"
+#include "version.h"
 #include <time.h>
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -20,11 +21,13 @@ LV_FONT_DECLARE(font_tiempos_56);
 LV_FONT_DECLARE(font_tiempos_48);
 LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_48);
+LV_FONT_DECLARE(font_styrene_36);
 LV_FONT_DECLARE(font_styrene_28);
 LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_mono_72);
 LV_FONT_DECLARE(font_mono_32);
 LV_FONT_DECLARE(font_mono_18);
 
@@ -185,9 +188,10 @@ static lv_obj_t *sld_sleep, *lbl_sleep_val;
 
 // ---- Permission screen (mirrors Claude Code's permission prompt, info-only) ----
 static lv_obj_t *approval_container;
-static lv_obj_t *lbl_approval_count;  // "1 / 3" badge (hidden when count == 1)
-static lv_obj_t *lbl_approval_tool;   // tool name, e.g. "Bash"
-static lv_obj_t *lbl_approval_detail; // command / path / url
+static lv_obj_t *lbl_approval_count;   // "1 / 3" badge (hidden when count == 1)
+static lv_obj_t *lbl_approval_session; // project folder of the blocked session
+static lv_obj_t *lbl_approval_tool;    // tool name, e.g. "Bash"
+static lv_obj_t *lbl_approval_detail;  // command / path / url
 
 // ---- Cached live Claude Code state (from ui_update) ----
 static claude_state_t s_claude_state = CLAUDE_IDLE;
@@ -619,15 +623,15 @@ static void init_clock_screen(lv_obj_t *scr)
 
     lbl_clock_time = lv_label_create(clock_container);
     lv_label_set_text(lbl_clock_time, "--:--");
-    lv_obj_set_style_text_font(lbl_clock_time, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_clock_time, &font_mono_72, 0);
     lv_obj_set_style_text_color(lbl_clock_time, COL_TEXT, 0);
-    lv_obj_align(lbl_clock_time, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_align(lbl_clock_time, LV_ALIGN_CENTER, 0, -44);
 
     lbl_clock_date = lv_label_create(clock_container);
     lv_label_set_text(lbl_clock_date, "");
-    lv_obj_set_style_text_font(lbl_clock_date, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_clock_date, &font_styrene_36, 0);
     lv_obj_set_style_text_color(lbl_clock_date, COL_DIM, 0);
-    lv_obj_align(lbl_clock_date, LV_ALIGN_CENTER, 0, 30);
+    lv_obj_align(lbl_clock_date, LV_ALIGN_CENTER, 0, 34);
 
     lbl_clock_batt = lv_label_create(clock_container);
     lv_label_set_text(lbl_clock_batt, "");
@@ -826,6 +830,14 @@ static void init_settings_screen(lv_obj_t *scr)
     lv_obj_add_event_cb(sld_sleep, sleep_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(sld_sleep, sleep_slider_cb, LV_EVENT_RELEASED, NULL);
 
+    // Firmware version — bottom-center, dim. Bumps after a successful OTA, so
+    // it's the at-a-glance check that an update landed.
+    lv_obj_t *ver = lv_label_create(settings_container);
+    lv_label_set_text(ver, "v" FW_VERSION);
+    lv_obj_set_style_text_font(ver, L.bt_credit_2_font, 0);
+    lv_obj_set_style_text_color(ver, COL_DIM, 0);
+    lv_obj_align(ver, LV_ALIGN_BOTTOM_MID, 0, -L.margin);
+
     lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN); // shown via swipe
 }
 
@@ -895,6 +907,18 @@ static void init_approval_screen(lv_obj_t *scr)
     // needs its top at title_y + 12.
     lv_obj_align(lbl_approval_count, LV_ALIGN_TOP_MID, 0, L.title_y + 12);
 
+    // Project folder of the blocked session, just below the header. Tells which
+    // session is waiting at a glance; hidden by approval_refresh_labels when the
+    // daemon sent no name (older daemon / no cwd).
+    lbl_approval_session = lv_label_create(approval_container);
+    lv_label_set_text(lbl_approval_session, "");
+    lv_obj_set_style_text_font(lbl_approval_session, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_approval_session, COL_TEXT, 0);
+    lv_obj_set_style_text_align(lbl_approval_session, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(lbl_approval_session, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_approval_session, L.content_w);
+    lv_obj_align(lbl_approval_session, LV_ALIGN_TOP_MID, 0, L.title_y + 12 + 34);
+
     // Tool name, large and centered.
     lbl_approval_tool = lv_label_create(approval_container);
     lv_label_set_text(lbl_approval_tool, "");
@@ -934,6 +958,15 @@ static void approval_refresh_labels(void)
     const Approval *a = (s_approval_n > 0) ? &s_approvals[s_approval_view_idx] : nullptr;
     const char *tool = a ? a->tool : "";
     const char *detail = a ? a->detail : "";
+    const char *session = a ? a->session : "";
+
+    // Project folder under the header (hidden when the daemon sent no name).
+    if (session[0]) {
+        lv_label_set_text(lbl_approval_session, session);
+        lv_obj_clear_flag(lbl_approval_session, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_approval_session, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // The daemon sends the raw trigger as tool_name. AskUserQuestion and
     // ExitPlanMode aren't permission prompts — they block on a user choice /
@@ -996,6 +1029,49 @@ static void settings_toggle_cb(lv_event_t *e)
     }
 }
 
+// Full-screen modal shown during a BLE firmware update. Opaque (unlike the
+// pairing/idle overlays) so it fully hides the screen underneath; raised to the
+// foreground in ui_ota_show() so it also covers the header + corner hit-zone.
+static lv_obj_t *ota_group = nullptr;
+static lv_obj_t *ota_bar = nullptr;
+static lv_obj_t *ota_pct_lbl = nullptr;
+
+static void build_ota_group(lv_obj_t *parent)
+{
+    ota_group = lv_obj_create(parent);
+    lv_obj_set_size(ota_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(ota_group, 0, 0);
+    lv_obj_set_style_bg_color(ota_group, COL_BG, 0);
+    lv_obj_set_style_bg_opa(ota_group, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(ota_group, 0, 0);
+    lv_obj_set_style_pad_all(ota_group, 0, 0);
+    lv_obj_clear_flag(ota_group, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(ota_group);
+    lv_label_set_text(title, "Updating...");  // ASCII dots: the styrene font has no U+2026 glyph
+    lv_obj_set_style_text_font(title, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -70);
+
+    ota_pct_lbl = lv_label_create(ota_group);
+    lv_label_set_text(ota_pct_lbl, "0%");
+    lv_obj_set_style_text_font(ota_pct_lbl, L.bt_status_font, 0);
+    lv_obj_set_style_text_color(ota_pct_lbl, COL_ACCENT, 0);
+    lv_obj_align(ota_pct_lbl, LV_ALIGN_CENTER, 0, -10);
+
+    ota_bar = make_bar(ota_group, 0, 0, L.content_w, 18);
+    lv_obj_align(ota_bar, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_bg_color(ota_bar, COL_ACCENT, LV_PART_INDICATOR);
+
+    lv_obj_t *warn = lv_label_create(ota_group);
+    lv_label_set_text(warn, "don't power off");
+    lv_obj_set_style_text_font(warn, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(warn, COL_DIM, 0);
+    lv_obj_align(warn, LV_ALIGN_CENTER, 0, 90);
+
+    lv_obj_add_flag(ota_group, LV_OBJ_FLAG_HIDDEN);
+}
+
 void ui_init(void)
 {
     compute_layout(board_caps());
@@ -1040,6 +1116,8 @@ void ui_init(void)
     lv_obj_add_flag(corner_hit, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(corner_hit, settings_toggle_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_pos(corner_hit, 0, 0); // logical top-left, over the logo
+
+    build_ota_group(scr); // created last; raised on demand during OTA
 }
 
 // React to a change in the cached Claude-state / approval-queue: refresh the
@@ -1348,6 +1426,33 @@ void ui_show_screen(screen_t screen)
 screen_t ui_get_current_screen(void)
 {
     return current_screen;
+}
+
+void ui_ota_show(bool show)
+{
+    if (!ota_group)
+        return;
+    if (show)
+    {
+        lv_obj_move_foreground(ota_group); // over header + corner hit-zone
+        lv_obj_clear_flag(ota_group, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(ota_group, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void ui_ota_set_pct(int pct)
+{
+    if (!ota_bar)
+        return;
+    if (pct < 0)
+        pct = 0;
+    else if (pct > 100)
+        pct = 100;
+    lv_bar_set_value(ota_bar, pct, LV_ANIM_OFF);
+    lv_label_set_text_fmt(ota_pct_lbl, "%d%%", pct);
 }
 
 // Carousel navigation. Virtual slot order: [Usage, Clock] + one slot per pending

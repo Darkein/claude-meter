@@ -7,6 +7,7 @@
 #include "data.h"
 #include "ui.h"
 #include "ble.h"
+#include "ota.h"
 #include "clock.h"
 #include "idle.h"
 #include "idle_cfg.h"
@@ -132,7 +133,7 @@ static bool parse_json(const char* json, UsageData* out) {
     out->claude_state = (claude_state_t)(int)(doc["cs"] | 0);
     out->approval_count = doc["aq"] | 0;
 
-    // Bounded approval queue. Each entry: {tn: tool, td: detail}.
+    // Bounded approval queue. Each entry: {tn: tool, td: detail, sn: session}.
     out->approval_n = 0;
     JsonArrayConst q = doc["q"].as<JsonArrayConst>();
     for (JsonObjectConst item : q) {
@@ -141,6 +142,7 @@ static bool parse_json(const char* json, UsageData* out) {
         Approval &a = out->approvals[out->approval_n++];
         strlcpy(a.tool, item["tn"] | "", sizeof(a.tool));
         strlcpy(a.detail, item["td"] | "", sizeof(a.detail));
+        strlcpy(a.session, item["sn"] | "", sizeof(a.session));
     }
 
     out->valid = true;
@@ -333,6 +335,52 @@ static void pair_tick(void) {
     }
 }
 
+// Drive the OTA progress overlay and finalize a transfer. Finalization (flash
+// commit + reboot) runs here, not in the BLE write callback, so it never blocks
+// the BLE host task. The panel is kept awake while a transfer is in flight so
+// the user can watch progress.
+static void ota_tick(void) {
+    static bool overlay_shown = false;
+    static int  last_pct = -1;
+
+    if (ota_active()) {
+        ota_drain();              // commit bytes the BLE task buffered to flash
+        idle_note_activity();     // don't sleep mid-update
+        if (!overlay_shown) {
+            idle_wake();
+            ui_ota_show(true);
+            overlay_shown = true;
+            last_pct = -1;
+        }
+        int pct = ota_progress_pct();
+        if (pct != last_pct) {
+            last_pct = pct;
+            ui_ota_set_pct(pct);
+        }
+    }
+
+    if (ble_ota_finish_requested()) {
+        if (ota_end()) {          // flushes the buffer, verifies, commits
+            ui_ota_set_pct(100);
+            ble_ota_notify_done();
+            lv_timer_handler();   // flush the 100% frame before we go down
+            delay(300);           // let the notify PDU + paint leave
+            ESP.restart();        // boots the freshly committed image
+        } else {
+            ble_ota_notify_error(ota_last_error());
+            ui_ota_show(false);
+            overlay_shown = false;
+        }
+        return;
+    }
+
+    if (!ota_active() && overlay_shown) {
+        // Aborted / disconnected mid-transfer — drop the overlay.
+        ui_ota_show(false);
+        overlay_shown = false;
+    }
+}
+
 void loop() {
     idle_tick();
 
@@ -356,6 +404,7 @@ void loop() {
     }
 
     ble_tick();
+    ota_tick();
     power_hal_tick();
 
     // ---- Physical buttons ----

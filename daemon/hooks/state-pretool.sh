@@ -18,14 +18,16 @@ SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 0
 TOOL=$(printf '%s' "$IN" | jq -r '.tool_name // ""')
 case "$TOOL" in AskUserQuestion|ExitPlanMode) exit 0 ;; esac   # let the asking hook own these
+CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
+NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
 
 DIR="$HOME/.config/claude-usage-monitor/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"
 EXIST=$(cat "$FILE" 2>/dev/null); [ -z "$EXIST" ] && EXIST='{}'
-printf '%s' "$EXIST" | jq -c --argjson ts "$(date +%s)" --arg sid "$SID" \
+printf '%s' "$EXIST" | jq -c --argjson ts "$(date +%s)" --arg sid "$SID" --arg name "$NAME" \
   '. + {activity:"working", activity_ts:$ts,
-        dialog:"none", kind:"", tool:"", detail:"", sid:$sid}' \
+        dialog:"none", kind:"", tool:"", detail:"", sid:$sid, name:$name}' \
   > "$TMP" && mv -f "$TMP" "$FILE"
 exit 0

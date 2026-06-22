@@ -45,13 +45,18 @@ DETAIL=$(printf '%s' "$IN" | jq -r '
   | tostring | gsub("\n";" ") | .[0:60]
 ')
 
+# Project folder name (basename of cwd), shown on the device to tell which
+# session is blocked. Capped to fit the device label + BLE payload budget.
+CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')
+NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
+
 DIR="$HOME/.config/claude-usage-monitor/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
 TMP="$FILE.tmp"
 EXIST=$(cat "$FILE" 2>/dev/null); [ -z "$EXIST" ] && EXIST='{}'
 printf '%s' "$EXIST" | jq -c --arg t "$TOOL" --arg d "$DETAIL" --arg sid "$SID" \
-  --argjson ts "$(date +%s)" \
-  '. + {dialog:"waiting", kind:"permission", tool:$t, detail:$d, dialog_ts:$ts, sid:$sid}' \
+  --arg name "$NAME" --argjson ts "$(date +%s)" \
+  '. + {dialog:"waiting", kind:"permission", tool:$t, detail:$d, dialog_ts:$ts, sid:$sid, name:$name}' \
   > "$TMP" && mv -f "$TMP" "$FILE"
 exit 1   # non-blocking "no opinion" — native prompt stays the sole approver

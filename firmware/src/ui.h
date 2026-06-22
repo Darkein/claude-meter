@@ -23,3 +23,9 @@ void ui_swipe(int dir);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
 void ui_update_volume(uint8_t idx);  // 0=off,1=low,2=med,3=high
+
+// Full-screen OTA progress modal, driven from the main loop during a BLE
+// firmware update. ui_ota_show(true) raises it over everything; set_pct paints
+// the bar (0..100).
+void ui_ota_show(bool show);
+void ui_ota_set_pct(int pct);

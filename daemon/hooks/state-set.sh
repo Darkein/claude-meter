@@ -39,6 +39,8 @@ KIND="${2:-}"          # asking only: question | plan | elicitation
 IN=$(cat)
 SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 0
+CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
+NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
 DIR="$HOME/.config/claude-usage-monitor/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
@@ -48,28 +50,28 @@ EXIST=$(cat "$FILE" 2>/dev/null); [ -z "$EXIST" ] && EXIST='{}'
 
 case "$STATE" in
   working)
-    printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" \
+    printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg name "$NAME" \
       '. + {activity:"working", activity_ts:$ts,
-            dialog:"none", kind:"", tool:"", detail:"", sid:$sid}' \
+            dialog:"none", kind:"", tool:"", detail:"", sid:$sid, name:$name}' \
       > "$TMP" && mv -f "$TMP" "$FILE"
     ;;
   idle)
     if [ "$(printf '%s' "$EXIST" | jq -r '.dialog // "none"')" = "waiting" ]; then
       # permission resolved with no tool run (deny / ESC) -> clear it.
-      printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" \
+      printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg name "$NAME" \
         '. + {activity:"idle", activity_ts:$ts,
-              dialog:"none", kind:"", tool:"", detail:"", sid:$sid}' \
+              dialog:"none", kind:"", tool:"", detail:"", sid:$sid, name:$name}' \
         > "$TMP" && mv -f "$TMP" "$FILE"
     else
       # asking or none: set activity only, never touch the dialog.
-      printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" \
-        '. + {activity:"idle", activity_ts:$ts, sid:$sid}' \
+      printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg name "$NAME" \
+        '. + {activity:"idle", activity_ts:$ts, sid:$sid, name:$name}' \
         > "$TMP" && mv -f "$TMP" "$FILE"
     fi
     ;;
   asking)
-    printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg k "$KIND" \
-      '. + {dialog:"asking", kind:$k, tool:"", detail:"", dialog_ts:$ts, sid:$sid}' \
+    printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg k "$KIND" --arg name "$NAME" \
+      '. + {dialog:"asking", kind:$k, tool:"", detail:"", dialog_ts:$ts, sid:$sid, name:$name}' \
       > "$TMP" && mv -f "$TMP" "$FILE"
     ;;
 esac

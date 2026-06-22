@@ -18,6 +18,8 @@ IN=$(cat)
 ACTION=$(printf '%s' "$IN" | jq -r '.user_response.action // "accept"')
 SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
 [ -z "$SID" ] && exit 0
+CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""')   # project folder -> device label
+NAME=$(basename "$CWD" 2>/dev/null); [ -z "$CWD" ] && NAME=""; NAME=${NAME:0:20}
 DIR="$HOME/.config/claude-usage-monitor/state"
 mkdir -p "$DIR"
 FILE="$DIR/$SID.json"
@@ -29,8 +31,8 @@ case "$ACTION" in
   decline|cancel) ACT="idle" ;;
   *)              ACT="working" ;;
 esac
-printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg act "$ACT" \
+printf '%s' "$EXIST" | jq -c --argjson ts "$NOW" --arg sid "$SID" --arg act "$ACT" --arg name "$NAME" \
   '. + {activity:$act, activity_ts:$ts,
-        dialog:"none", kind:"", tool:"", detail:"", sid:$sid}' \
+        dialog:"none", kind:"", tool:"", detail:"", sid:$sid, name:$name}' \
   > "$TMP" && mv -f "$TMP" "$FILE"
 exit 0

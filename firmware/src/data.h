@@ -17,8 +17,10 @@
 //   cs int    claude_state (0..4, see below) -> claude_state
 //   aq int    approval queue length (total)  -> approval_count
 //   q  array  pending approvals (bounded):   -> approvals[] / approval_n
-//             [{tn:tool, td:detail}, ...] FIFO order, so the device can swipe
-//             between each. aq may exceed the array length (badge "i / aq").
+//             [{tn:tool, td:detail, sn:session}, ...] FIFO order, so the device
+//             can swipe between each. sn = project folder name of the blocked
+//             session (dropped by the daemon if the payload would exceed the
+//             512 B RX buffer). aq may exceed the array length (badge "i / aq").
 // (The daemon's internal `_queue` field is stripped before sending.)
 // `t` carries LOCAL wall time as an epoch (the device has no timezone); store
 // and display it verbatim.
@@ -40,8 +42,9 @@ enum claude_state_t {
 // to keep the worst-case BLE JSON under the 512-byte RX buffer.
 #define MAX_APPROVALS 4
 struct Approval {
-    char tool[16];    // tool name (e.g. "Bash", "Write")
-    char detail[64];  // command / path / url, truncated by the daemon
+    char tool[16];     // tool name (e.g. "Bash", "Write")
+    char detail[64];   // command / path / url, truncated by the daemon
+    char session[24];  // sn — project folder of the blocked session (may be empty)
 };
 
 struct UsageData {

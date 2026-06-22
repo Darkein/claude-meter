@@ -56,7 +56,7 @@ def test_asking_question_reported_immediately(state_dir):
     _write(state_dir, "a", dialog="asking", kind="question", dialog_ts=now)
     out = core._claude_state_fields()
     assert out["cs"] == 4 and out["aq"] == 1
-    assert out["q"] == [{"tn": "AskUserQuestion", "td": ""}]
+    assert out["q"] == [{"tn": "AskUserQuestion", "td": "", "sn": ""}]
 
 
 def test_asking_plan_maps_to_exitplanmode(state_dir):
@@ -104,7 +104,7 @@ def test_waiting_needs_two_stable_reads(state_dir):
     # Second read with the same dialog_ts: matured -> permission pending.
     out2 = core._claude_state_fields()
     assert out2["cs"] == 2 and out2["aq"] == 1
-    assert out2["q"] == [{"tn": "Bash", "td": "rm -rf /tmp/x"}]
+    assert out2["q"] == [{"tn": "Bash", "td": "rm -rf /tmp/x", "sn": ""}]
 
 
 def test_waiting_too_young_not_counted(state_dir):
@@ -140,6 +140,64 @@ def test_asking_priority_over_activity_concurrent_sessions(state_dir):
     _write(state_dir, "a", dialog="asking", kind="question", dialog_ts=now)
     _write(state_dir, "b", dialog="none", activity="working", activity_ts=now)
     assert core._claude_state_fields()["cs"] == 4
+
+
+def test_session_name_flows_to_sn(state_dir):
+    # The project folder name written by the hooks surfaces as q[].sn, for both
+    # a matured waiting prompt and an asking dialog.
+    now = time.time()
+    _write(state_dir, "a", dialog="waiting", kind="permission", tool="Bash",
+           detail="ls", name="claude-meter", dialog_ts=now - 3,
+           activity="working", activity_ts=now - 3)
+    core._claude_state_fields()                       # first read (stabilise)
+    out = core._claude_state_fields()                 # matured
+    assert out["q"][0]["sn"] == "claude-meter"
+
+    state_dir_glob = list(state_dir.glob("*.json"))
+    for f in state_dir_glob:
+        f.unlink()
+    core._waiting_seen.clear()
+    _write(state_dir, "b", dialog="asking", kind="question",
+           name="my-project", dialog_ts=now)
+    out = core._claude_state_fields()
+    assert out["cs"] == 4 and out["q"][0]["sn"] == "my-project"
+
+
+def test_write_payload_drops_sn_over_budget(monkeypatch):
+    # When the payload would exceed the 512 B device RX buffer, sn is the first
+    # thing dropped so usage + state always get through.
+    big = "x" * 20
+    payload = {
+        "s": 100.0, "sr": 300, "w": 100.0, "wr": 9999, "st": "limited",
+        "ok": True, "t": 1718800000, "cs": 2, "aq": 4,
+        "q": [{"tn": "Bash", "td": "y" * 60, "sn": big} for _ in range(4)],
+    }
+    sent = {}
+
+    class _FakeClient:
+        async def write_gatt_char(self, _uuid, data, response=False):
+            sent["data"] = data
+
+    sess = core.Session(_FakeClient())
+    assert asyncio.run(sess.write_payload(payload)) is True
+    blob = sent["data"].decode()
+    assert len(sent["data"]) <= 511
+    assert '"sn"' not in blob          # dropped under pressure
+    assert '"td"' in blob and '"s":' in blob  # usage + detail survive
+
+
+def test_write_payload_keeps_sn_when_small(monkeypatch):
+    payload = {"ok": True, "cs": 2, "aq": 1,
+               "q": [{"tn": "Bash", "td": "ls", "sn": "claude-meter"}]}
+    sent = {}
+
+    class _FakeClient:
+        async def write_gatt_char(self, _uuid, data, response=False):
+            sent["data"] = data
+
+    sess = core.Session(_FakeClient())
+    assert asyncio.run(sess.write_payload(payload)) is True
+    assert '"sn":"claude-meter"' in sent["data"].decode()
 
 
 def test_working_dominates_idle_across_sessions(state_dir):
