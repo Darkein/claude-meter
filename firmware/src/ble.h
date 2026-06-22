@@ -20,3 +20,12 @@ const char* ble_get_data(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);
+
+// --- OTA (firmware update over BLE) ---
+// Set true once an END frame arrives; reading it clears the flag. The main loop
+// owns finalization (flash commit + reboot) so it never runs inside the BLE
+// host-task callback. See ota.h.
+bool ble_ota_finish_requested(void);
+// Report the terminal OTA result to the host on the TX characteristic.
+void ble_ota_notify_done(void);
+void ble_ota_notify_error(int code);

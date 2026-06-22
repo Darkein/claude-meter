@@ -22,7 +22,29 @@ def _select_backend():
 
 
 def main_cli() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m daemon")
+    parser.add_argument(
+        "--ota", metavar="FIRMWARE_BIN",
+        help="push this firmware .bin to the device over BLE, then exit. "
+             "Stop any running daemon first (it holds the BLE link).",
+    )
+    parser.add_argument(
+        "--board", metavar="ENV",
+        help="expected board id (PlatformIO env name) for the OTA board guard.",
+    )
+    args = parser.parse_args()
+
     backend = _select_backend()
+
+    if args.ota:
+        from daemon import ota_push
+        try:
+            sys.exit(asyncio.run(ota_push.run(backend, args.ota, args.board)))
+        except KeyboardInterrupt:
+            sys.exit(130)
+
     from daemon import core
     try:
         asyncio.run(core.main(backend))

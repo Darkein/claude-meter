@@ -2,6 +2,10 @@
 firmware/.pio/
 firmware/.vscode/
 
+# Auto-versioning (firmware/tools/gen_version.py) — local to each build machine
+firmware/.fw_version.json
+firmware/src/version_gen.h
+
 # OS
 .DS_Store
 

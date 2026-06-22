@@ -1,6 +1,10 @@
 #include "ble.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <host/ble_gap.h>   // ble_gap_set_prefered_le_phy / ble_gap_set_data_len
+#include "ota.h"
+#include "version.h"
+#include "hal/board_caps.h"
 
 #define DEVICE_NAME "Clawdmeter"
 
@@ -9,6 +13,8 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define OTA_CHAR_UUID       "4c41555a-4465-7669-6365-000000000005"  // host streams firmware frames here
+#define INFO_CHAR_UUID      "4c41555a-4465-7669-6365-000000000006"  // host reads board id + fw version
 
 #define BLE_BUF_SIZE 512
 
@@ -16,13 +22,17 @@ static NimBLEServer* server = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* ota_char = nullptr;
+static NimBLECharacteristic* info_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
+static volatile bool ota_finish_req = false;
 static char mac_str[18];
+static char info_json[160];
 
 static void start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -96,9 +106,68 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// Firmware-update channel. Each write is one frame: a 1-byte opcode + payload.
+//   0x01 BEGIN: u32 LE total size + 32-byte SHA-256 of the whole image
+//   0x02 DATA : raw image bytes, in order (appended to the OTA partition)
+//   0x03 END  : finalize — flagged here, committed on the main loop (the flash
+//               commit + reboot must not run inside the BLE host task)
+//   0x04 ABORT: cancel the in-progress transfer
+// The opcode prefix on DATA disambiguates it from control frames, since image
+// bytes can themselves start with 0x01/0x03/0x04.
+class OtaCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string v = chr->getValue();
+        if (v.empty()) return;
+        const uint8_t* p = (const uint8_t*)v.data();
+        size_t n = v.size();
+        switch (p[0]) {
+        case 0x01:  // BEGIN
+            if (n < 1 + 4 + 32) { ble_ota_notify_error(OTA_ERR_BEGIN); break; }
+            {
+                uint32_t size = (uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+                                ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24);
+                if (!ota_begin(size, p + 5)) {
+                    ble_ota_notify_error(ota_last_error());
+                } else if (server) {
+                    // Crank the link for the transfer. All degrade gracefully if
+                    // the central clamps/ignores them; relaxed on abort (a
+                    // successful transfer reboots, which resets everything).
+                    uint16_t ch = info.getConnHandle();
+                    // Tight connection interval (7.5–15 ms): more events per second.
+                    server->updateConnParams(ch, 6, 12, 0, 400);
+                    // 2M PHY (BLE 5): double the raw symbol rate.
+                    ble_gap_set_prefered_le_phy(ch, BLE_GAP_LE_PHY_2M_MASK,
+                                                BLE_GAP_LE_PHY_2M_MASK, 0);
+                    // Data Length Extension: 251-byte LL payload instead of 27, so
+                    // a 511-byte ATT write is ~3 link-layer packets, not ~19.
+                    ble_gap_set_data_len(ch, 251, 0x0848);
+                }
+            }
+            break;
+        case 0x02:  // DATA
+            if (n > 1 && !ota_write(p + 1, n - 1))
+                ble_ota_notify_error(ota_last_error());
+            break;
+        case 0x03:  // END
+            ota_finish_req = true;
+            break;
+        case 0x04:  // ABORT
+            ota_abort();
+            if (server)  // back off to a relaxed interval
+                server->updateConnParams(info.getConnHandle(), 24, 40, 0, 400);
+            break;
+        default:
+            break;
+        }
+    }
+};
+
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+    // Ask for a large ATT MTU so OTA chunks are big (BlueZ negotiates up; macOS
+    // caps ~185 and ignores this — the host adapts its chunk size either way).
+    NimBLEDevice::setMTU(517);
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();
@@ -132,6 +201,26 @@ void ble_init(void) {
     );
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
+
+    // OTA firmware channel. WRITE (with response) gives free flow-control;
+    // WRITE_NR is also allowed for a future faster path.
+    ota_char = svc->createCharacteristic(
+        OTA_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    static OtaCallbacks otaCb;
+    ota_char->setCallbacks(&otaCb);
+
+    // Read-only board id + firmware version, so the OTA host can refuse a
+    // wrong-board image and confirm the version after a reboot.
+    info_char = svc->createCharacteristic(
+        INFO_CHAR_UUID,
+        NIMBLE_PROPERTY::READ
+    );
+    snprintf(info_json, sizeof(info_json),
+        "{\"board\":\"%s\",\"fw\":\"%s\",\"git\":\"%s\"}",
+        board_caps().id, FW_VERSION, FW_GIT);
+    info_char->setValue((uint8_t*)info_json, strlen(info_json));
 
     svc->start();
     server->start();
@@ -201,5 +290,27 @@ void ble_request_refresh(void) {
         req_char->setValue(&v, 1);
         req_char->notify();
         Serial.println("BLE: refresh requested");
+    }
+}
+
+bool ble_ota_finish_requested(void) {
+    if (!ota_finish_req) return false;
+    ota_finish_req = false;
+    return true;
+}
+
+void ble_ota_notify_done(void) {
+    if (state == BLE_STATE_CONNECTED && tx_char) {
+        tx_char->setValue("{\"ota\":\"done\"}");
+        tx_char->notify();
+    }
+}
+
+void ble_ota_notify_error(int code) {
+    if (state == BLE_STATE_CONNECTED && tx_char) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "{\"ota\":\"err\",\"c\":%d}", code);
+        tx_char->setValue(buf);
+        tx_char->notify();
     }
 }
