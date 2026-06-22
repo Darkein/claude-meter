@@ -1,6 +1,14 @@
-# Clawdmeter
+# claude-meter
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+> **Fork.** This is a fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter)
+> with extra screens (clock, settings, live Claude Code state), audio chimes,
+> over-the-air firmware updates, light-sleep power saving, and a rewritten
+> cross-platform host daemon. The BLE device still advertises as `Clawdmeter`,
+> so the original pairing/daemon flow is unchanged. See
+> [What's new in this fork](#whats-new-in-this-fork). All credit for the
+> original project and the bulk of the firmware goes upstream.
+
+A small ESP32 dashboard for your desk to keep an eye on Claude Code usage.
 
 It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
@@ -12,9 +20,21 @@ Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
 
 The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
 
+## What's new in this fork
+
+Everything upstream still works; this fork adds:
+
+- **Clock screen** — wall-clock + date + battery, reached by swiping (uses the on-board RTC where present, e.g. PCF85063 on the C6).
+- **Settings screen** — brightness / volume / sleep-delay sliders, opened by tapping the logo.
+- **Live Claude Code state** — an Approval screen that mirrors Claude Code's tool-permission prompt (display-only), plus status updates driven by the daemon's hook-state pipeline.
+- **Audio chimes + volume control** — synthesized chimes on boards with a speaker (ES8311 codec on the C6), with volume adjustable from the settings screen.
+- **OTA firmware updates over BLE** — push a new image without a USB cable: `python -m daemon --ota`. See [`docs/porting/ota.md`](docs/porting/ota.md).
+- **Light-sleep power saving** — the panel sleeps after an idle delay to cut battery draw, configurable from settings.
+- **Rewritten cross-platform daemon** — a single `python -m daemon` entry point with per-platform backends (macOS / Linux / Windows) over a shared core.
+
 ## Screens
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash. Swipe to reach the Clock screen, and tap the logo to open Settings. When Claude Code raises a tool-permission prompt, the Approval screen mirrors it.
 
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
@@ -158,7 +178,7 @@ This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-rep
 python -m venv .venv
 .venv\Scripts\Activate.ps1        # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, then retry
 pip install -r daemon\requirements-windows.txt
-python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ctrl+C to stop
+python -m daemon                                     # runs in the foreground; Ctrl+C to stop
 ```
 
 ### Tray icon and menu
