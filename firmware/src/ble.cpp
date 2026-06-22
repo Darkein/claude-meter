@@ -222,8 +222,7 @@ void ble_init(void) {
         board_caps().id, FW_VERSION, FW_GIT);
     info_char->setValue((uint8_t*)info_json, strlen(info_json));
 
-    svc->start();
-    server->start();
+    server->start();  // starts all created services; NimBLEService::start() is a deprecated no-op
     start_advertising();
 
     Serial.printf("BLE: init complete, MAC=%s\n", mac_str);
