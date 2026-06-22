@@ -1,7 +1,7 @@
 #include "ui.h"
 #include "splash.h"
 #include <lvgl.h>
-#include "logo.h"
+#include <esp_random.h>
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "hal/audio_hal.h"
@@ -156,7 +156,8 @@ static lv_obj_t *lbl_anim; // status line: connection state + whimsical idle
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t *battery_img;
-static lv_obj_t *logo_img;
+static splash_mini_t *corner_creature; // top-left header creature, animation driven by Claude state
+static splash_mini_t *idle_creature;   // full-screen sleeping creature on the idle/no-data view
 static lv_image_dsc_t battery_dscs[5]; // empty, low, medium, full, charging
 
 // ---- Volume indicator (shared, on top, left of battery) ----
@@ -207,7 +208,6 @@ static bool s_error_active = false;       // daemon reported a catchable API err
 static char s_error_msg[96] = "";         // em — device-displayable message
 
 // ---- Shared ----
-static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
 static bool s_ble_connected = false; // cached BLE connection state
 static uint32_t connected_at_ms = 0; // when we last entered CONNECTED ("Connected" dwell)
@@ -519,9 +519,9 @@ static void build_idle_group(lv_obj_t *parent)
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t *creature = splash_mini_create(idle_group, "expression sleep", 160);
-    if (creature)
-        lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
+    idle_creature = splash_mini_create(idle_group, "expression sleep", 160);
+    if (idle_creature)
+        lv_obj_align(splash_mini_canvas(idle_creature), LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN); // update_view_state decides
 }
@@ -1081,7 +1081,6 @@ void ui_init(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(scr, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
 
-    init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
     init_volume_icons();
 
@@ -1090,9 +1089,11 @@ void ui_init(void)
     init_settings_screen(scr);
     init_approval_screen(scr);
 
-    logo_img = lv_image_create(scr);
-    lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, L.margin, L.title_y - 10);
+    // Top-left header creature: replaces the old static logo. Its animation is
+    // driven by Claude's live state in ui_tick_anim() (see corner_anim_for_state).
+    corner_creature = splash_mini_create(scr, "expression sleep", 80); // 80/20 => cell 4, 80×80
+    if (corner_creature)
+        lv_obj_set_pos(splash_mini_canvas(corner_creature), L.margin, L.title_y - 10);
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -1351,9 +1352,80 @@ static bool compute_status_text(char *buf, size_t n)
     return animated;
 }
 
+// The looping animation for the corner creature in each Claude state, or NULL
+// when Claude is settled-idle — then the creature runs the "living idle" handler
+// (corner_idle_tick). Mirrors compute_status_text()'s priority. Playful mapping:
+// working / attention / just-finished each read distinctly across the room.
+static const char *corner_loop_anim(void)
+{
+    uint32_t now = lv_tick_get();
+    if (!s_ble_connected || view_state == 1)
+        return "expression sleep"; // no host connection / stale data — sleeping
+    if (s_claude_state == CLAUDE_QUESTION)
+        return "idle look around"; // blocked on a user question
+    if (s_claude_state == CLAUDE_WAITING)
+        return "expression surprise"; // tool-permission prompt pending
+    if (s_claude_state == CLAUDE_WORKING)
+        return "work think";
+    if (s_claude_state == CLAUDE_IDLE && (now - s_idle_since_ms) < IDLE_FINISHED_MS)
+        return "dance bounce"; // a turn just finished — celebrate briefly
+    return NULL; // CLAUDE_IDLE (settled) / CLAUDE_NONE — hand off to living idle
+}
+
+// Living idle: hold a fixed neutral pose and, every ~2–10 s, play one of the idle
+// micro-animations once at random, then settle back to the pose.
+static bool s_corner_idle = false;
+static uint32_t s_corner_idle_next_ms = 0;
+static uint32_t corner_idle_gap(void) { return 2000 + (esp_random() % 8000); }
+static void corner_idle_tick(void)
+{
+    uint32_t now = lv_tick_get();
+    if (!s_corner_idle)
+    { // just entered idle — settle on the neutral pose
+        s_corner_idle = true;
+        splash_mini_freeze(corner_creature, "idle breathe", 0);
+        s_corner_idle_next_ms = now + corner_idle_gap();
+        return;
+    }
+    if (splash_mini_busy(corner_creature))
+    { // a micro-animation is playing — advance it
+        splash_mini_tick(corner_creature);
+        if (!splash_mini_busy(corner_creature))
+        { // it just finished — back to the pose, schedule the next one
+            splash_mini_freeze(corner_creature, "idle breathe", 0);
+            s_corner_idle_next_ms = now + corner_idle_gap();
+        }
+    }
+    else if (now >= s_corner_idle_next_ms)
+    {
+        static const char *const idle_anims[] = {"idle breathe", "idle blink", "idle look around"};
+        splash_mini_play_once(corner_creature, idle_anims[esp_random() % 3]);
+    }
+}
+
 void ui_tick_anim(void)
 {
     char buf[80];
+
+    // The header-corner creature is on `scr`, so it shows on every screen — drive
+    // and tick it before the per-screen early-returns below. update_view_state()
+    // guards on no-change, so the in-branch calls remain correct.
+    update_view_state();
+    if (corner_creature)
+    {
+        const char *loop = corner_loop_anim();
+        if (loop)
+        {
+            s_corner_idle = false;
+            splash_mini_set_anim(corner_creature, loop);
+            splash_mini_tick(corner_creature);
+        }
+        else
+        {
+            corner_idle_tick();
+        }
+    }
+
     if (current_screen == SCREEN_CLOCK)
     {
         clock_refresh();
@@ -1371,8 +1443,8 @@ void ui_tick_anim(void)
     if (current_screen != SCREEN_USAGE)
         return;
     update_view_state();
-    if (view_state == 1)
-        splash_mini_tick(); // animate the sleeping creature on the idle screen
+    if (view_state == 1 && idle_creature)
+        splash_mini_tick(idle_creature); // animate the sleeping creature on the idle screen
 
     bool animated = compute_status_text(buf, sizeof(buf));
     lv_obj_set_style_text_color(lbl_anim, animated ? COL_ACCENT : COL_TEXT, 0);
@@ -1415,9 +1487,6 @@ void ui_show_screen(screen_t screen)
     default:
         break;
     }
-
-    if (logo_img)
-        lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
 
     current_screen = screen;
     apply_battery_visibility();

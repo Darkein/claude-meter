@@ -9,61 +9,131 @@
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
 
 // ---- Mini creature: a small animated creature for embedding in a screen
-//      (e.g. the idle "sleeping" indicator). Self-contained — its own canvas
-//      and buffer. ----
-static lv_obj_t  *mini_canvas = NULL;
-static uint16_t  *mini_buf = NULL;
-static int        mini_cell = 0;
-static int        mini_w = 0;
-static const splash_anim_def_t *mini_anim = NULL;
-static uint16_t   mini_frame = 0;
-static uint32_t   mini_started = 0;
+//      (e.g. the idle "sleeping" indicator, or the state-driven header corner).
+//      Instance-based — each handle owns its own canvas and buffer, so several
+//      can run at once. ----
+struct splash_mini {
+    lv_obj_t  *canvas;
+    uint16_t  *buf;
+    int        cell;
+    int        w;
+    const splash_anim_def_t *anim;
+    uint16_t   frame;
+    uint32_t   started;
+    bool       loop;   // true = wrap forever; false = one-shot or frozen
+    bool       busy;   // (loop==false) true while a play_once is still advancing
+};
 
-static void mini_render(void) {
-    if (!mini_buf || !mini_anim) return;
-    const uint8_t *cells = mini_anim->frames[mini_frame];
-    const uint16_t *pal = mini_anim->palette;
+static const splash_anim_def_t *find_anim(const char *anim_name) {
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++)
+        if (strcmp(splash_anims[i].name, anim_name) == 0) return &splash_anims[i];
+    return NULL;
+}
+
+static void mini_render(splash_mini_t *m) {
+    if (!m->buf || !m->anim) return;
+    const uint8_t *cells = m->anim->frames[m->frame];
+    const uint16_t *pal = m->anim->palette;
     for (int gy = 0; gy < GRID; gy++) {
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
             uint16_t color = (pal && code < SPLASH_PALETTE_SIZE) ? pal[code] : COL_EMPTY;
-            for (int dy = 0; dy < mini_cell; dy++) {
-                uint16_t *dst = &mini_buf[(gy * mini_cell + dy) * mini_w + gx * mini_cell];
-                for (int dx = 0; dx < mini_cell; dx++) dst[dx] = color;
+            for (int dy = 0; dy < m->cell; dy++) {
+                uint16_t *dst = &m->buf[(gy * m->cell + dy) * m->w + gx * m->cell];
+                for (int dx = 0; dx < m->cell; dx++) dst[dx] = color;
             }
         }
     }
-    if (mini_canvas) lv_obj_invalidate(mini_canvas);
+    if (m->canvas) lv_obj_invalidate(m->canvas);
 }
 
-lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
-    mini_anim = NULL;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { mini_anim = &splash_anims[i]; break; }
-    }
-    if (!mini_anim) return NULL;
-    mini_cell = px / GRID;
-    if (mini_cell < 1) mini_cell = 1;
-    mini_w = GRID * mini_cell;
+splash_mini_t *splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
+    const splash_anim_def_t *anim = find_anim(anim_name);
+    if (!anim) return NULL;
+
+    int cell = px / GRID;
+    if (cell < 1) cell = 1;
+    int w = GRID * cell;
 #ifdef BOARD_HAS_PSRAM
     const uint32_t caps = MALLOC_CAP_SPIRAM;
 #else
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 #endif
-    mini_buf = (uint16_t*)heap_caps_malloc(mini_w * mini_w * 2, caps);
-    if (!mini_buf) return NULL;
-    mini_canvas = lv_canvas_create(parent);
-    lv_canvas_set_buffer(mini_canvas, mini_buf, mini_w, mini_w, LV_COLOR_FORMAT_RGB565);
-    mini_frame = 0;
-    mini_started = millis();
-    mini_render();
-    return mini_canvas;
+    splash_mini_t *m = (splash_mini_t*)heap_caps_malloc(sizeof(splash_mini_t),
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!m) return NULL;
+    m->buf = (uint16_t*)heap_caps_malloc(w * w * 2, caps);
+    if (!m->buf) { heap_caps_free(m); return NULL; }
+    m->cell = cell;
+    m->w = w;
+    m->anim = anim;
+    m->frame = 0;
+    m->started = millis();
+    m->loop = true;
+    m->busy = false;
+    m->canvas = lv_canvas_create(parent);
+    lv_canvas_set_buffer(m->canvas, m->buf, w, w, LV_COLOR_FORMAT_RGB565);
+    mini_render(m);
+    return m;
 }
 
-void splash_mini_tick(void) {
-    if (!mini_buf || !mini_anim || mini_anim->frame_count == 0) return;
-    if (millis() - mini_started < mini_anim->holds[mini_frame]) return;
-    mini_started = millis();
-    mini_frame = (mini_frame + 1) % mini_anim->frame_count;
-    mini_render();
+lv_obj_t *splash_mini_canvas(splash_mini_t *m) {
+    return m ? m->canvas : NULL;
+}
+
+void splash_mini_set_anim(splash_mini_t *m, const char *anim_name) {
+    if (!m) return;
+    const splash_anim_def_t *anim = find_anim(anim_name);
+    if (!anim) return;
+    m->loop = true;   // (re)enter looping mode
+    m->busy = false;
+    if (anim == m->anim) return; // already on it — keep its current frame/loop
+    m->anim = anim;
+    m->frame = 0;
+    m->started = millis();
+    mini_render(m);
+}
+
+void splash_mini_play_once(splash_mini_t *m, const char *anim_name) {
+    if (!m) return;
+    const splash_anim_def_t *anim = find_anim(anim_name);
+    if (!anim) return;
+    m->anim = anim;
+    m->frame = 0;
+    m->started = millis();
+    m->loop = false;
+    m->busy = true;
+    mini_render(m);
+}
+
+void splash_mini_freeze(splash_mini_t *m, const char *anim_name, int frame) {
+    if (!m) return;
+    const splash_anim_def_t *anim = find_anim(anim_name);
+    if (!anim) return;
+    if (frame < 0) frame = 0;
+    if (frame >= anim->frame_count) frame = anim->frame_count - 1;
+    m->anim = anim;
+    m->frame = (uint16_t)frame;
+    m->started = millis();
+    m->loop = false;
+    m->busy = false;
+    mini_render(m);
+}
+
+bool splash_mini_busy(splash_mini_t *m) {
+    return m && m->busy;
+}
+
+void splash_mini_tick(splash_mini_t *m) {
+    if (!m || !m->buf || !m->anim || m->anim->frame_count == 0) return;
+    if (!m->loop && !m->busy) return; // frozen on a fixed frame — nothing to do
+    if (millis() - m->started < m->anim->holds[m->frame]) return;
+    m->started = millis();
+    if (m->frame + 1 >= m->anim->frame_count) {
+        if (m->loop) { m->frame = 0; mini_render(m); }
+        else { m->busy = false; } // one-shot finished — hold the last frame
+    } else {
+        m->frame++;
+        mini_render(m);
+    }
 }
