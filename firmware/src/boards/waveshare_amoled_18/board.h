@@ -6,6 +6,7 @@
 // because the panel mounts in a fixed orientation in the kit's enclosure.
 
 #define BOARD_NAME           "Waveshare AMOLED 1.8"
+#define BOARD_ID             "waveshare_amoled_18"
 
 // ---- Display geometry (portrait) ----
 #define LCD_WIDTH            368

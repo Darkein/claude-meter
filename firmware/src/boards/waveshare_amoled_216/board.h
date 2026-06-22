@@ -5,6 +5,7 @@
 // IMU-driven CPU rotation is enabled.
 
 #define BOARD_NAME           "Waveshare AMOLED 2.16"
+#define BOARD_ID             "waveshare_amoled_216"
 
 // ---- Display geometry (matches BoardCaps; duplicated here as compile-time
 // constants because the buffer-size math runs at file scope) ----

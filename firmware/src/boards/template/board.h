@@ -5,6 +5,7 @@
 // for a walk-through.
 
 #define BOARD_NAME           "TODO: human-readable board name"
+#define BOARD_ID             "TODO_platformio_env_name"
 
 // ---- Display geometry ----
 // Active panel pixel dimensions (post-orientation).

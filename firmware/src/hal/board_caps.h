@@ -10,6 +10,8 @@
 // goes here so shared code stays free of #ifdef BOARD_*.
 struct BoardCaps {
     const char* name;        // human-readable, e.g. "Waveshare AMOLED 2.16"
+    const char* id;          // stable machine id = PlatformIO env name; the OTA
+                             // host uses it to refuse a wrong-board image
 
     int16_t width;           // active display width in pixels
     int16_t height;          // active display height in pixels

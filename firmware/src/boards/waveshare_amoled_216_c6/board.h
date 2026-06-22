@@ -12,6 +12,7 @@
 // ESP-IDF example user_config.h files in the same repo.
 
 #define BOARD_NAME           "Waveshare AMOLED 2.16 (C6)"
+#define BOARD_ID             "waveshare_amoled_216_c6"
 
 #define LCD_WIDTH            480
 #define LCD_HEIGHT           480

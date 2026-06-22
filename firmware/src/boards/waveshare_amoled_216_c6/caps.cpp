@@ -3,6 +3,7 @@
 
 static const BoardCaps caps = {
     .name = BOARD_NAME,
+    .id = BOARD_ID,
     .width = LCD_WIDTH,
     .height = LCD_HEIGHT,
     // BOOT (primary) + KEY (secondary) GPIO buttons. PWR is on the AXP
