@@ -14,6 +14,7 @@
 #include "brightness.h"
 #include "volume.h"
 #include "sleeptimeout.h"
+#include "soundtheme.h"
 #include "battery_estimate.h"
 
 #include "hal/board_caps.h"
@@ -281,6 +282,7 @@ void setup() {
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     volume_init();   // load saved volume, apply to audio HAL, set the top-bar icon
+    soundtheme_init(); // load saved sound theme, apply to audio HAL
     ui_show_screen(SCREEN_USAGE);
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",

@@ -12,6 +12,7 @@
 #include "brightness.h"
 #include "volume.h"
 #include "sleeptimeout.h"
+#include "soundtheme.h"
 #include "battery_estimate.h"
 #include "version.h"
 #include <time.h>
@@ -29,6 +30,7 @@ LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
 LV_FONT_DECLARE(font_mono_72);
 LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_mono_24);
 LV_FONT_DECLARE(font_mono_18);
 
 // Layout values computed from the active board's geometry. Populated once
@@ -184,11 +186,20 @@ static lv_obj_t *lbl_clock_date;
 static lv_obj_t *lbl_clock_batt;
 static lv_obj_t *lbl_clock_status; // mirrors the usage-screen Claude-state line
 
-// ---- Settings screen (brightness / volume / sleep-delay sliders) ----
+// ---- Settings screen (paged: brightness / volume / sound-theme / sleep) ----
+// settings_container holds the title, the "n / N" page indicator, the version
+// label, and two full-size page sub-containers we swipe between. With audio:
+// page 0 = brightness + volume + sound theme, page 1 = sleep. Without audio:
+// page 0 = brightness + sleep (single page, identical to before).
 static lv_obj_t *settings_container;
+static lv_obj_t *settings_page[2];          // page 1 (idx 1) only built when has_audio
+static lv_obj_t *lbl_settings_page;         // "n / N" indicator (hidden when single page)
+static uint8_t   settings_page_count = 1;
+static uint8_t   settings_page_idx = 0;
 static lv_obj_t *sld_brightness, *lbl_brightness_val;
 static lv_obj_t *sld_volume, *lbl_volume_val;     // volume row absent when !has_audio
 static lv_obj_t *sld_sleep, *lbl_sleep_val;
+static lv_obj_t *dd_theme;                        // sound-theme dropdown; NULL when !has_audio
 
 // ---- Permission screen (mirrors Claude Code's permission prompt, info-only) ----
 static lv_obj_t *approval_container;
@@ -788,6 +799,113 @@ static void sleep_slider_cb(lv_event_t *e)
         sleeptimeout_set((uint8_t)idx);
 }
 
+// Sound-theme picker: a real dropdown (the only non-slider Settings input).
+static void theme_dd_cb(lv_event_t *e)
+{
+    lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
+    // Persist + apply + audition the picked theme.
+    soundtheme_set((uint8_t)lv_dropdown_get_selected(dd));
+}
+
+// Build the "Sound theme" row: a left label + a right-aligned dropdown that
+// lists the theme names. It opens upward (LV_DIR_TOP) because the row sits low
+// on the page. Returns the dropdown.
+static lv_obj_t *make_theme_row(lv_obj_t *parent, int y)
+{
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "Sound theme");
+    lv_obj_set_style_text_font(lbl, L.set_label_font, 0);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_set_pos(lbl, L.margin, y);
+
+    // Newline-joined option list straight from the theme labels.
+    char opts[96];
+    opts[0] = '\0';
+    for (uint8_t i = 0; i < soundtheme_count(); i++)
+    {
+        if (i)
+            strlcat(opts, "\n", sizeof(opts));
+        strlcat(opts, soundtheme_label(i), sizeof(opts));
+    }
+
+    lv_obj_t *dd = lv_dropdown_create(parent);
+    lv_dropdown_set_options(dd, opts);
+    lv_dropdown_set_selected(dd, soundtheme_get());
+    lv_dropdown_set_dir(dd, LV_DIR_TOP); // open upward — the row is near the bottom
+    lv_obj_set_style_text_font(dd, L.set_label_font, 0);
+    lv_obj_set_style_text_color(dd, COL_TEXT, 0);
+    lv_obj_set_style_bg_color(dd, COL_BAR_BG, 0);
+    lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dd, 0, 0);
+    lv_obj_set_style_radius(dd, 6, 0);
+    lv_obj_set_width(dd, L.content_w / 2); // explicit — LV_SIZE_CONTENT collapses it
+    lv_obj_align(dd, LV_ALIGN_TOP_RIGHT, -L.margin, y - 8);
+
+    // The chevron glyph lives in the default Montserrat font; our styrene fonts
+    // carry no symbols (that was the tofu square). Draw it in the accent orange.
+    lv_obj_set_style_text_font(dd, &lv_font_montserrat_14, LV_PART_INDICATOR);
+    lv_obj_set_style_text_color(dd, COL_ACCENT, LV_PART_INDICATOR);
+
+    // Open-list styling: larger option text + the app's dark/orange theme. The
+    // list object exists from construction, so we can style it once here.
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    lv_obj_set_style_text_font(list, L.set_label_font, LV_PART_MAIN);
+    lv_obj_set_style_text_color(list, COL_TEXT, LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(list, 8, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(list, COL_PANEL, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(list, COL_ACCENT, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(list, 8, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(list, COL_ACCENT, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_CHECKED);
+
+    lv_obj_add_event_cb(dd, theme_dd_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return dd;
+}
+
+// One full-size transparent settings page. Swipes bubble through to the screen
+// gesture handler (which flips pages); hidden pages get LV_OBJ_FLAG_HIDDEN.
+static lv_obj_t *make_settings_page(lv_obj_t *parent)
+{
+    lv_obj_t *p = lv_obj_create(parent);
+    lv_obj_set_size(p, L.scr_w, L.scr_h);
+    lv_obj_set_pos(p, 0, 0);
+    lv_obj_set_style_bg_opa(p, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p, 0, 0);
+    lv_obj_set_style_pad_all(p, 0, 0);
+    lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(p, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    return p;
+}
+
+// Show settings page `idx`, hide the other, and refresh the "n / N" indicator
+// (hidden entirely when there's only one page).
+static void settings_show_page(uint8_t idx)
+{
+    if (idx >= settings_page_count)
+        idx = 0;
+    settings_page_idx = idx;
+    for (uint8_t i = 0; i < 2; i++)
+    {
+        if (!settings_page[i])
+            continue;
+        if (i == idx)
+            lv_obj_clear_flag(settings_page[i], LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(settings_page[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!lbl_settings_page)
+        return;
+    if (settings_page_count > 1)
+    {
+        lv_label_set_text_fmt(lbl_settings_page, "%d / %d", idx + 1, settings_page_count);
+        lv_obj_clear_flag(lbl_settings_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+        lv_obj_add_flag(lbl_settings_page, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void init_settings_screen(lv_obj_t *scr)
 {
     settings_container = lv_obj_create(scr);
@@ -805,29 +923,46 @@ static void init_settings_screen(lv_obj_t *scr)
     lv_obj_set_style_text_color(title, COL_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
 
-    int y = L.set_row_y;
+    // Page indicator, just under the title (shown only when paged).
+    lbl_settings_page = lv_label_create(settings_container);
+    lv_obj_set_style_text_font(lbl_settings_page, L.bt_credit_2_font, 0);
+    lv_obj_set_style_text_color(lbl_settings_page, COL_DIM, 0);
+    lv_obj_align_to(lbl_settings_page, title, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
 
+    const bool audio = board_caps().has_audio;
+    settings_page_count = audio ? 2 : 1;
+    settings_page[0] = make_settings_page(settings_container);
+    settings_page[1] = audio ? make_settings_page(settings_container) : NULL;
+
+    // ---- Page 0: brightness (+ volume + sound theme when there's audio) ----
+    int y = L.set_row_y;
     int b = brightness_get();
-    sld_brightness = make_setting_row(settings_container, y, "Brightness",
+    sld_brightness = make_setting_row(settings_page[0], y, "Brightness",
                                       &lbl_brightness_val, BRIGHTNESS_MIN, 255, b);
     lv_label_set_text_fmt(lbl_brightness_val, "%d%%", b * 100 / 255);
     lv_obj_add_event_cb(sld_brightness, brightness_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(sld_brightness, brightness_slider_cb, LV_EVENT_RELEASED, NULL);
     y += L.set_row_gap;
 
-    if (board_caps().has_audio)
+    if (audio)
     {
         int v = volume_get();
-        sld_volume = make_setting_row(settings_container, y, "Volume",
+        sld_volume = make_setting_row(settings_page[0], y, "Volume",
                                       &lbl_volume_val, 0, 255, v);
         lv_label_set_text_fmt(lbl_volume_val, "%d%%", v * 100 / 255);
         lv_obj_add_event_cb(sld_volume, volume_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_add_event_cb(sld_volume, volume_slider_cb, LV_EVENT_RELEASED, NULL);
         y += L.set_row_gap;
+
+        dd_theme = make_theme_row(settings_page[0], y);
+        y += L.set_row_gap;
     }
 
+    // ---- Sleep: page 1 (top row) when paged, else page 0 (next row) ----
+    lv_obj_t *sleep_parent = audio ? settings_page[1] : settings_page[0];
+    int sleep_y = audio ? L.set_row_y : y;
     int si = sleeptimeout_get();
-    sld_sleep = make_setting_row(settings_container, y, "Sleep after",
+    sld_sleep = make_setting_row(sleep_parent, sleep_y, "Sleep after",
                                  &lbl_sleep_val, 0, sleeptimeout_count() - 1, si);
     lv_label_set_text(lbl_sleep_val, sleeptimeout_label((uint8_t)si));
     lv_obj_add_event_cb(sld_sleep, sleep_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
@@ -841,7 +976,8 @@ static void init_settings_screen(lv_obj_t *scr)
     lv_obj_set_style_text_color(ver, COL_DIM, 0);
     lv_obj_align(ver, LV_ALIGN_BOTTOM_MID, 0, -L.margin);
 
-    lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN); // shown via swipe
+    settings_show_page(0);                                   // initial page + indicator
+    lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN); // shown via the logo tap
 }
 
 // Re-sync the sliders + value labels to the live values. Called on screen entry
@@ -854,7 +990,7 @@ static void settings_refresh(void)
 {
     if (!settings_container)
         return;
-    static int last_b = -1, last_v = -1, last_s = -1;
+    static int last_b = -1, last_v = -1, last_s = -1, last_t = -1;
 
     int b = brightness_get();
     if (b != last_b)
@@ -879,6 +1015,15 @@ static void settings_refresh(void)
         last_s = si;
         lv_slider_set_value(sld_sleep, si, LV_ANIM_OFF);
         lv_label_set_text(lbl_sleep_val, sleeptimeout_label((uint8_t)si));
+    }
+    if (dd_theme)
+    {
+        int t = soundtheme_get();
+        if (t != last_t)
+        {
+            last_t = t;
+            lv_dropdown_set_selected(dd_theme, (uint16_t)t);
+        }
     }
 }
 
@@ -935,7 +1080,7 @@ static void init_approval_screen(lv_obj_t *scr)
     // Detail (command / path / url), smaller, dimmed, below the tool name.
     lbl_approval_detail = lv_label_create(approval_container);
     lv_label_set_text(lbl_approval_detail, "");
-    lv_obj_set_style_text_font(lbl_approval_detail, &font_mono_18, 0);
+    lv_obj_set_style_text_font(lbl_approval_detail, &font_mono_24, 0);
     lv_obj_set_style_text_color(lbl_approval_detail, COL_ACCENT, 0);
     lv_obj_set_style_text_align(lbl_approval_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(lbl_approval_detail, LV_LABEL_LONG_WRAP);
@@ -1157,11 +1302,16 @@ void ui_update(const UsageData *data)
 
     // Notification chimes on a state transition (edge-triggered so the daemon's
     // periodic re-send of the same cs doesn't re-beep). No-op on boards without
-    // a speaker. WAITING / QUESTION → attention chime; turn-finished → done chime.
+    // a speaker. Distinct sounds per kind so the user can tell them apart by ear:
+    // WAITING (cs=2) = a tool-permission prompt; QUESTION (cs=4) = a plan approval
+    // or AskUserQuestion; turn-finished = done. The active sound theme picks the
+    // actual audio for each.
     if (data->claude_state != s_claude_state)
     {
-        if (data->claude_state == CLAUDE_WAITING || data->claude_state == CLAUDE_QUESTION)
-            audio_hal_play(SND_ALERT);
+        if (data->claude_state == CLAUDE_WAITING)
+            audio_hal_play(SND_PERMISSION);
+        else if (data->claude_state == CLAUDE_QUESTION)
+            audio_hal_play(SND_ASK);
         else if (data->claude_state == CLAUDE_IDLE && s_claude_state == CLAUDE_WORKING)
             audio_hal_play(SND_DONE);
 
@@ -1527,7 +1677,8 @@ void ui_show_screen(screen_t screen)
         break;
     case SCREEN_SETTINGS:
         lv_obj_clear_flag(settings_container, LV_OBJ_FLAG_HIDDEN);
-        settings_refresh(); // sync sliders to values changed via the buttons
+        settings_show_page(0); // always open on the first page
+        settings_refresh();    // sync sliders to values changed via the buttons
         break;
     case SCREEN_APPROVAL:
         lv_obj_clear_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
@@ -1581,7 +1732,16 @@ void ui_swipe(int dir)
     if (dir == 0)
         return;
     if (current_screen == SCREEN_SETTINGS)
-        return; // logo-toggled, not swipeable
+    {
+        // Settings isn't in the carousel; a swipe here flips between its pages.
+        if (settings_page_count <= 1)
+            return;
+        uint8_t n = (uint8_t)(((int)settings_page_idx + (dir > 0 ? 1 : -1) +
+                               settings_page_count) %
+                              settings_page_count);
+        settings_show_page(n);
+        return;
+    }
 
     int total = 2 + s_approval_n;      // Usage, Clock, then each approval
     int cur;

@@ -1,5 +1,6 @@
 #include "../../hal/audio_hal.h"
 #include "board.h"
+#include "audio_samples.h"   // generated: sampled themes (16 kHz/16-bit/mono PCM)
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
@@ -9,8 +10,10 @@
 //   ESP32-C6 I2S0 (TX) --> ES8311 codec --> speaker amp (powered by AXP2101
 //   ALDO2, already enabled in board_init) --> onboard speaker.
 //
-// We only ever play short synthesized sine chimes, so the codec runs DAC-only
-// at 16 kHz / 16-bit / mono. The ES8311 register sequence below mirrors the
+// We play short notification sounds — either synthesized sine chimes (the
+// "Retro" theme) or embedded PCM clips (the sampled themes, see
+// audio_samples.h) — so the codec runs DAC-only at 16 kHz / 16-bit / mono. The
+// ES8311 register sequence below mirrors the
 // Espressif es8311 component's default DAC bring-up with MCLK supplied by the
 // I2S peripheral (MCLK = 256 * Fs). Hand-rolled rather than pulling in a codec
 // library — same no-vendored-dep stance as the touch driver.
@@ -99,21 +102,34 @@ static bool i2s_setup(void) {
     return i2s_channel_enable(s_tx) == ESP_OK;
 }
 
-// ---- Chime definitions ---------------------------------------------------
-// Each chime is a short list of (frequency, duration) notes. ALERT rises so it
-// reads as "I need you"; DONE falls so it reads as "finished".
+// ---- Retro theme: synthesized chimes -------------------------------------
+// The "Retro" theme (index 0) keeps these synth chimes; the sampled themes use
+// PCM from audio_samples.h instead. Each chime is a short list of
+// (frequency, duration) notes. PERMISSION rises ("I need you"); ASK lilts
+// upward like a question; DONE falls ("finished"). All three are distinct so
+// permission / plan / done are tellable apart by ear even on Retro.
 struct chime_note_t { uint16_t hz; uint16_t ms; };
 
-static const chime_note_t CHIME_ALERT[] = { {523, 90}, {659, 90}, {784, 140} };  // C5 E5 G5 ↑
-static const chime_note_t CHIME_DONE[]  = { {784, 110}, {523, 160} };            // G5 C5 ↓
+static const chime_note_t CHIME_PERMISSION[] = { {523, 90}, {659, 90}, {784, 140} }; // C5 E5 G5 ↑
+static const chime_note_t CHIME_ASK[]        = { {659, 90}, {988, 170} };            // E5 B5 ↗ (question)
+static const chime_note_t CHIME_DONE[]       = { {784, 110}, {523, 160} };           // G5 C5 ↓
+#define N_NOTES(a) ((uint8_t)(sizeof(a) / sizeof((a)[0])))
 
-// Playback state machine, advanced from audio_hal_tick(). We render one note
-// per tick into a stack buffer and push it to I2S with a short timeout, so the
-// main loop never stalls on a long chime.
+// Playback state machine, advanced from audio_hal_tick(). Synth and PCM paths
+// are mutually exclusive (s_seq XOR s_pcm). Synth renders one note per tick;
+// PCM streams one chunk per tick. Either way the main loop never stalls long.
 static const chime_note_t* s_seq   = nullptr;
 static uint8_t        s_seq_len = 0;
 static uint8_t        s_idx     = 0;
 static double         s_phase   = 0.0;   // carried across tick boundaries (continuous)
+
+// Sampled-theme playback: a pointer straight into the flash PCM array (no RAM
+// copy — safe on the no-PSRAM C6) plus a cursor.
+static const int16_t* s_pcm     = nullptr;
+static uint32_t       s_pcm_len = 0;
+static uint32_t       s_pcm_pos = 0;
+
+static uint8_t s_theme = 0;   // 0 = Retro synth; >0 = sampled theme in SND_TABLE
 
 // Volume: a continuous 0..255 value scales the sine amplitude linearly up to
 // VOL_AMP_MAX. 0 = silent (audio_hal_play early-returns). The DAC hardware gain
@@ -160,12 +176,34 @@ void audio_hal_init(void) {
 }
 
 void audio_hal_play(audio_sound_t sound) {
-    if (!s_ready || s_seq) return;   // ignore if busy with a chime
-    if (s_vol == 0) return;          // muted
-    if (sound == SND_ALERT) { s_seq = CHIME_ALERT; s_seq_len = 3; }
-    else                    { s_seq = CHIME_DONE;  s_seq_len = 2; }
+    if (!s_ready || s_seq || s_pcm) return;   // ignore if busy with a sound
+    if (s_vol == 0) return;                   // muted
+
+    // Sampled theme: play the PCM clip for this event if the active theme has
+    // one. Falls through to the synth chime when the entry is empty (Retro, or
+    // a theme that didn't bundle this event).
+    if (s_theme < SND_THEME_COUNT && (int)sound < SND_EVENT_COUNT) {
+        const sound_sample_t& s = SND_TABLE[s_theme][(int)sound];
+        if (s.data && s.len) {
+            s_pcm = s.data;
+            s_pcm_len = s.len;
+            s_pcm_pos = 0;
+            return;
+        }
+    }
+
+    // Retro / fallback: synthesized chime.
+    switch (sound) {
+        case SND_PERMISSION: s_seq = CHIME_PERMISSION; s_seq_len = N_NOTES(CHIME_PERMISSION); break;
+        case SND_ASK:        s_seq = CHIME_ASK;        s_seq_len = N_NOTES(CHIME_ASK);        break;
+        default:             s_seq = CHIME_DONE;       s_seq_len = N_NOTES(CHIME_DONE);       break;
+    }
     s_idx = 0;
     s_phase = 0.0;
+}
+
+void audio_hal_set_theme(uint8_t idx) {
+    s_theme = idx;
 }
 
 void audio_hal_set_volume(uint8_t val) {
@@ -177,7 +215,26 @@ uint8_t audio_hal_get_volume(void) { return s_vol; }
 
 void audio_hal_tick(void) {
     if (!s_ready) return;
-    if (s_seq) {
+    if (s_pcm) {
+        // Stream one chunk straight from the flash PCM array, scaling each
+        // sample by volume (samples are peak-normalized at build time to match
+        // the synth's amplitude, so vol=255 is full level).
+        static int16_t buf[256];
+        uint32_t remain = s_pcm_len - s_pcm_pos;
+        uint32_t chunk  = remain < 256 ? remain : 256;
+        for (uint32_t i = 0; i < chunk; i++)
+            buf[i] = (int16_t)((int32_t)s_pcm[s_pcm_pos + i] * s_vol / 255);
+        size_t wrote = 0;
+        i2s_channel_write(s_tx, buf, chunk * sizeof(int16_t), &wrote, portMAX_DELAY);
+        s_pcm_pos += chunk;
+        if (s_pcm_pos >= s_pcm_len) {
+            s_pcm = nullptr;                 // clip done
+            static const int16_t flush[512] = {0};
+            size_t w = 0;
+            for (int i = 0; i < 4; i++)
+                i2s_channel_write(s_tx, flush, sizeof(flush), &w, pdMS_TO_TICKS(20));
+        }
+    } else if (s_seq) {
         render_note(s_seq[s_idx]);
         s_phase = 0.0;                   // restart phase per note (gap-free enough at these durations)
         if (++s_idx >= s_seq_len) {

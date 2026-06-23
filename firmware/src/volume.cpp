@@ -43,7 +43,7 @@ void volume_set(uint8_t val) {
 
     // Audible confirmation at the new level (skipped automatically when muted —
     // audio_hal_play early-returns at 0).
-    audio_hal_play(SND_ALERT);
+    audio_hal_play(SND_PERMISSION);
     Serial.printf("Volume set: val=%u\n", cur_val);
 }
 

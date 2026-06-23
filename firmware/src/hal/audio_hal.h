@@ -11,13 +11,19 @@
 // nothing blocks the LVGL/BLE loop.
 
 enum audio_sound_t {
-    SND_ALERT = 0,   // Claude needs you: permission request or AskUserQuestion
-    SND_DONE  = 1,   // Claude finished its turn (idle)
+    SND_PERMISSION = 0,  // cs=2 CLAUDE_WAITING — a tool-permission prompt is pending
+    SND_ASK        = 1,  // cs=4 CLAUDE_QUESTION — plan approval or AskUserQuestion
+    SND_DONE       = 2,  // WORKING -> IDLE — Claude finished its turn
 };
 
 void audio_hal_init(void);
 void audio_hal_tick(void);
 void audio_hal_play(audio_sound_t sound);
+
+// Select the active sound theme by index (0 = Retro synth chimes; higher
+// indices map to sampled themes on boards that bundle them). Boards without
+// audio no-op. Persistence lives in soundtheme.{h,cpp}, not here.
+void audio_hal_set_theme(uint8_t idx);
 
 // Volume 0..255 (0 = off/mute, 255 = loudest), applied continuously to the
 // codec amplitude. Boards without audio no-op on set and return 0 on get.

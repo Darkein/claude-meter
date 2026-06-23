@@ -1,0 +1,22 @@
+{
+  "_comment": "Maps sound themes/events to source WAV files (relative to tools/). Theme 0 (retro) is synthesized in firmware, so it has no files. Run tools/build_sounds.sh to regenerate audio_samples.h. See SOUNDS.md for sources + licenses.",
+  "themes": ["retro", "modern", "bells", "arcade"],
+  "events": ["permission", "ask", "done"],
+  "files": {
+    "modern": {
+      "permission": "sounds/modern_permission.wav",
+      "ask": "sounds/modern_ask.wav",
+      "done": "sounds/modern_done.wav"
+    },
+    "bells": {
+      "permission": "sounds/bells_permission.wav",
+      "ask": "sounds/bells_ask.wav",
+      "done": "sounds/bells_done.wav"
+    },
+    "arcade": {
+      "permission": "sounds/arcade_permission.wav",
+      "ask": "sounds/arcade_ask.wav",
+      "done": "sounds/arcade_done.wav"
+    }
+  }
+}
