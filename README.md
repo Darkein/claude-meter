@@ -85,10 +85,15 @@ sorted attention-first.
 |      ![Usage](screenshots/usage.png)      |      ![Clock](screenshots/clock.png)       |
 | 5h + weekly utilization, live status line | Wall-clock, date, battery (swipe to reach) |
 
-|                      Settings                      |                Approval                 |
-| :------------------------------------------------: | :-------------------------------------: |
-|       ![Settings](screenshots/settings.png)        |  ![Approval](screenshots/approval.png)  |
-| Brightness / volume / theme / sleep (tap the logo) | Mirrors a Claude Code permission prompt |
+|                    Sessions                    |                      Settings                      |
+| :--------------------------------------------: | :------------------------------------------------: |
+|      ![Sessions](screenshots/sessions.png)     |       ![Settings](screenshots/settings.png)        |
+| Live sessions, one row per project + state dot | Brightness / volume / theme / sleep (tap the logo) |
+
+|                Approval                 |
+| :-------------------------------------: |
+|  ![Approval](screenshots/approval.png)  |
+| Mirrors a Claude Code permission prompt |
 
 When the device has no fresh data it shows an idle sleeping-Clawd animation; while disconnected
 it shows a pairing hint (**hold the BOOT button for 3 seconds, then release, to enter pairing
