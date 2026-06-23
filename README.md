@@ -2,9 +2,10 @@
 
 > **This is a fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).**
 > It tracks all of the original's functionality and adds a clock screen, a settings
-> screen, a live Claude Code state line, an approval screen that mirrors tool-permission
-> prompts, audio chimes + volume control, light-sleep power saving, over-the-air firmware
-> updates, and a rewritten cross-platform host daemon. The BLE device advertises as
+> screen, a live Claude Code state line, a multi-session dashboard, an approval screen that
+> mirrors tool-permission prompts, an animated creature that reacts to Claude's state, audio
+> chimes with selectable sound themes + volume control, light-sleep power saving, over-the-air
+> firmware updates, and a rewritten cross-platform host daemon. The BLE device advertises as
 > `Claude Meter`. Full credit for the original project and the bulk of the firmware goes upstream.
 
 A small ESP32 dashboard for your desk that keeps an eye on your Claude Code usage **and**
@@ -18,6 +19,12 @@ polls the Anthropic API for usage and feeds Claude Code's session state to the d
 - **Live Claude Code state** — a status line that shows whether Claude is working (an animated
   whimsical verb + spinner), finished its turn, idle, or waiting on you. State changes wake the
   panel so you notice them across the room.
+- **Animated creature** — the top-left creature reacts to Claude's state: it codes while Claude
+  works, thinks while it waits on a tool or a question, bounces when a turn finishes, sleeps when
+  there's no data, and breathes/blinks/looks around when idle. One-shot reactions fire on notable
+  events (a dance when a long task lands, a surprise when a usage window resets or crosses 80%).
+- **Sessions dashboard** — a screen listing your live Claude Code sessions, one row per project
+  with a colored state dot (working / waiting / question / idle), sorted attention-first.
 - **Approval screen** — when Claude Code raises a tool-permission prompt, the device mirrors it
   (tool name, the command/path/url, the project name, and an `i / N` badge when several are
   queued). It's display-only — you still approve on your laptop — and you can swipe between
@@ -25,9 +32,11 @@ polls the Anthropic API for usage and feeds Claude Code's session state to the d
 - **Clock screen** — wall-clock + date + battery, reached by swiping. Boards with a hardware RTC
   (the C6) keep correct time offline; the others sync time from the daemon.
 - **Settings screen** — tap the logo to open sliders for brightness, chime volume (audio boards),
-  and the auto-sleep delay. The firmware version is shown at the bottom.
-- **Audio chimes** — boards with a speaker (the C6) play a chime when Claude needs you and when it
-  finishes; volume is adjustable from the Settings screen.
+  and the auto-sleep delay, plus a sound-theme picker (audio boards). The firmware version is
+  shown at the bottom.
+- **Audio chimes + sound themes** — boards with a speaker (the C6) play a chime when Claude needs
+  you and when it finishes. Pick from four themes — **Retro** (synthesized), **Modern**, **Bells**,
+  **Arcade** (sampled) — and adjust the volume, both from the Settings screen.
 - **Light-sleep power saving** — the panel fades out after a configurable idle delay and the CPU
   drops to a low-power loop; touch, a button, Claude activity, or USB power wakes it. It never
   sleeps while on USB power.
@@ -45,11 +54,14 @@ have (a speaker, a hardware RTC, a second button, PSRAM).
 | ------------------------------------ | :----------: | :----------: | :----------------: |
 | Usage meter (5h + weekly)            |      ✅       |      ✅       |         ✅          |
 | Live Claude Code state + status line |      ✅       |      ✅       |         ✅          |
+| Animated creature (reacts to state)  |      ✅       |      ✅       |         ✅          |
+| Sessions dashboard (swipe)           |      ✅       |      ✅       |         ✅          |
 | Approval screen (permission mirror)  |      ✅       |      ✅       |         ✅          |
 | Clock screen (swipe)                 |      ✅       |      ✅       |         ✅          |
 | Offline clock (hardware RTC)         |      —       |      ✅       |         —          |
 | Settings (brightness / sleep delay)  |      ✅       |      ✅       |         ✅          |
 | Audio chimes                         |      —       |      ✅       |         —          |
+| Sound themes (Retro/Modern/Bells/Arcade) | —        |      ✅       |         —          |
 | Volume control                       |      —       |      ✅       |         —          |
 | Light-sleep power saving             |      ✅       |      ✅       |         ✅          |
 | OTA firmware update (over BLE)       |      ✅       |      ✅       |         ✅          |
@@ -62,9 +74,11 @@ have (a speaker, a hardware RTC, a second button, PSRAM).
 ## Screens
 
 The device boots into the **Usage** screen. **Swipe** left/right to cycle Usage → Clock →
-any pending Approval and back. **Tap the logo** (top-left) to open Settings. The Approval
-screen is raised automatically whenever Claude Code is waiting on a permission prompt, and
-drops back when the prompt is resolved.
+Sessions → any pending Approval and back. **Tap the logo** (top-left) to open Settings. The
+Approval screen is raised automatically whenever Claude Code is waiting on a permission prompt,
+and drops back when the prompt is resolved. The **Sessions** screen lists your live Claude Code
+sessions, one row per project with a colored state dot (working / waiting / question / idle),
+sorted attention-first.
 
 |                   Usage                   |                   Clock                    |
 | :---------------------------------------: | :----------------------------------------: |
@@ -74,7 +88,7 @@ drops back when the prompt is resolved.
 |                      Settings                      |                Approval                 |
 | :------------------------------------------------: | :-------------------------------------: |
 |       ![Settings](screenshots/settings.png)        |  ![Approval](screenshots/approval.png)  |
-| Brightness / volume / sleep sliders (tap the logo) | Mirrors a Claude Code permission prompt |
+| Brightness / volume / theme / sleep (tap the logo) | Mirrors a Claude Code permission prompt |
 
 When the device has no fresh data it shows an idle sleeping-Clawd animation; while disconnected
 it shows a pairing hint (**hold the BOOT button for 3 seconds, then release, to enter pairing
@@ -242,7 +256,7 @@ for the wire protocol.
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
 4. A set of Claude Code hooks (installed by the installer) write per-session state files; the
-   daemon aggregates them into a live state + an approval queue.
+   daemon aggregates them into a live state, a per-session list, and an approval queue.
 5. The daemon connects to the device over BLE and writes a single JSON payload (usage + state) to
    the GATT RX characteristic; the firmware parses it and updates the LVGL UI.
 6. The firmware tracks the rate of change of the session % to pick the matching idle animation, and
@@ -281,13 +295,16 @@ fit the BLE MTU; unknown keys ignored, missing keys keep defaults):
 ```json
 { "s": 63, "sr": 142, "w": 41, "wr": 5040, "st": "allowed", "ok": true,
   "t": 1782139020, "cs": 2, "aq": 2,
-  "q": [ { "tn": "Bash", "td": "git push origin main", "sn": "claude-meter" } ] }
+  "q": [ { "tn": "Bash", "td": "git push origin main", "sn": "claude-meter" } ],
+  "ss": [ { "n": "claude-meter", "cs": 2 }, { "n": "daemon", "cs": 1 } ] }
 ```
 
 Fields: `s`/`sr` = session % and reset (minutes), `w`/`wr` = weekly % and reset, `st` = status,
 `ok` (+ `em` error message when false), `t` = local wall-clock epoch, `cs` = Claude state
 (0 idle, 1 working, 2 waiting, 3 none, 4 question), `aq` = pending-approval count, `q` = the
-bounded approval list (`tn` tool, `td` detail, `sn` session name).
+bounded approval list (`tn` tool, `td` detail, `sn` session name), `ss` = the bounded per-session
+list for the Sessions dashboard (`n` project name, `cs` per-session state), sorted attention-first.
+The daemon truncates `q` then `ss` to keep the payload within the BLE RX buffer.
 
 ## Recompiling fonts
 
