@@ -289,49 +289,54 @@ void setup() {
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
-// Hold-to-pair gesture: hold the PWR button ~3s, then RELEASE → clear all BLE
-// bonds and re-advertise. Clearing on *release* (not while held) is deliberate:
-// holding to power the device OFF (AXP hardware shutdown at 8s) must not wipe
-// the bond — a power-off hold never releases before shutdown. To stop a
-// "chicken-out" release just before 8s from pairing, the gesture disarms at 6s.
-//
-//   ~1.5s long-press edge → PENDING
-//   3.0s (+1500)          → ARMED   (release from here clears bonds)
-//   6.0s (+4500)          → DISARMED (no clear; AXP powers off at 8s)
-#define PAIR_ARM_AFTER_LONG_MS    1500   // 3.0s total
-#define PAIR_DISARM_AFTER_LONG_MS 4500   // 6.0s total
-enum pair_state_t { PAIR_IDLE, PAIR_PENDING, PAIR_ARMED };
+// Hold-to-pair gesture on the BOOT (primary) button: hold ~3s → "release to
+// pair" → release clears all BLE bonds, re-advertises, and opens a soft,
+// time-limited pairing window. Pairing moved off the PWR button, so there is no
+// power-off hold to collide with — hence no disarm stage (the old PWR gesture
+// disarmed at 6s only to dodge the 8s AXP shutdown). Releasing before 3s simply
+// cancels. The window is UI-only: the radio stays connectable throughout so a
+// bonded host can always reconnect; it just bounds the "pairing" state the
+// screen shows and auto-reverts after PAIR_WINDOW_MS (or on connect).
+#define PAIR_HOLD_MS    3000     // hold this long before release-to-pair arms
+#define PAIR_WINDOW_MS  120000   // soft open window after a release-to-pair
+enum pair_state_t { PAIR_IDLE, PAIR_HELD, PAIR_ARMED };
 static pair_state_t pair_state        = PAIR_IDLE;
-static uint32_t     pair_long_seen_ms = 0;
+static uint32_t     pair_held_since   = 0;
+static uint32_t     pair_window_until = 0;
 
 static void pair_tick(void) {
-    if (pair_state == PAIR_IDLE && power_hal_pwr_long_pressed()) {
-        pair_state = PAIR_PENDING;
-        pair_long_seen_ms = millis();
-        (void)power_hal_pwr_released();  // drain any stale release edge
-        Serial.println("PWR long-press: hold to ~3s then release to pair");
+    // Soft pairing-window expiry: revert the UI once it elapses or a host
+    // connects. The BLE link itself is never closed here.
+    if (pair_window_until &&
+        (millis() >= pair_window_until || ble_get_state() == BLE_STATE_CONNECTED)) {
+        pair_window_until = 0;
+        ui_set_pair_hint(PAIR_HINT_IDLE);
+    }
+
+    // Only run the gesture while awake — a press that wakes the panel (consumed
+    // in the button block) must not also start a pairing hold.
+    if (idle_is_asleep()) { pair_state = PAIR_IDLE; return; }
+
+    bool held = input_hal_is_held(INPUT_BTN_PRIMARY);
+
+    if (pair_state == PAIR_IDLE) {
+        if (held) { pair_state = PAIR_HELD; pair_held_since = millis(); }
         return;
     }
-    if (pair_state == PAIR_IDLE) return;
-
-    if (power_hal_pwr_released()) {
+    if (!held) {  // released
         if (pair_state == PAIR_ARMED) {
-            Serial.println("Pair: released in window — clearing bonds, advertising");
+            Serial.println("Pair: released — clearing bonds, advertising");
             ble_clear_bonds();
-        } else {
-            Serial.println("Pair: released too early — cancelled");
+            pair_window_until = millis() + PAIR_WINDOW_MS;
+            ui_set_pair_hint(PAIR_HINT_OPEN);
         }
         pair_state = PAIR_IDLE;
         return;
     }
-
-    uint32_t held = millis() - pair_long_seen_ms;
-    if (pair_state == PAIR_PENDING && held >= PAIR_ARM_AFTER_LONG_MS) {
+    if (pair_state == PAIR_HELD && millis() - pair_held_since >= PAIR_HOLD_MS) {
         pair_state = PAIR_ARMED;
+        ui_set_pair_hint(PAIR_HINT_ARMED);
         Serial.println("Pair: armed — release to pair");
-    } else if (pair_state == PAIR_ARMED && held >= PAIR_DISARM_AFTER_LONG_MS) {
-        pair_state = PAIR_IDLE;  // power-off territory; don't pair
-        Serial.println("Pair: disarmed (holding toward power-off)");
     }
 }
 
@@ -408,35 +413,34 @@ void loop() {
     power_hal_tick();
 
     // ---- Physical buttons ----
-    //   PRIMARY (BOOT)   → cycle brightness
-    //   SECONDARY (KEY)  → cycle chime volume (only if the board has one)
-    //   PWR              → hold ~3s + release: pairing mode (no short-press action)
+    //   PRIMARY (BOOT)   → hold ~3s + release: pairing (handled in pair_tick)
+    //   SECONDARY (KEY)  → cycle to the next screen (only if the board has one)
+    //   PWR              → short press toggles screen sleep/wake; power off/on
+    //                      is AXP hardware (hold / press), not handled here
     // First press from sleep is consumed as a wake-only event by
-    // idle_consume_wake_press(); the normal action fires from the second
-    // press. Activity bookkeeping happens inside idle_consume_wake_press
-    // so no separate idle_note_activity() call is needed here. Brightness and
-    // volume are taps (fire on the press edge only — no release handling).
+    // idle_consume_wake_press() (which also does the idle-timer activity
+    // bookkeeping); the normal action fires from the second press. KEY is a tap
+    // (fires on the press edge only). Brightness/volume now live in Settings.
     {
+        // Drain the primary edge so a wake-press is consumed here and does not
+        // also start a pairing hold (pair_tick is gated on !idle_is_asleep()).
         static bool primary_was = false;
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
-        if (primary_now != primary_was) {
-            if (primary_now && !idle_consume_wake_press()) brightness_cycle();
-            primary_was = primary_now;
-        }
+        if (primary_now && !primary_was) (void)idle_consume_wake_press();
+        primary_was = primary_now;
 
         if (board_caps().button_count >= 2) {
             static bool secondary_was = false;
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
             if (secondary_now != secondary_was) {
-                if (secondary_now && !idle_consume_wake_press()) volume_cycle();
+                if (secondary_now && !idle_consume_wake_press()) ui_swipe(+1);
                 secondary_was = secondary_now;
             }
         }
 
         if (power_hal_pwr_pressed()) {
             // PWR toggles the screen: wakes if asleep (consume_wake_press
-            // returns true), otherwise puts it to sleep. Pairing is the hold
-            // gesture (pair_tick), independent of this short-press toggle.
+            // returns true), otherwise puts it to sleep.
             if (!idle_consume_wake_press()) idle_sleep_now();
         }
 

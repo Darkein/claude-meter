@@ -144,6 +144,9 @@ static lv_obj_t *error_group;       // API-error message — shown when the daem
 static lv_obj_t *lbl_error;         // the wrapped error text inside error_group
 static lv_obj_t *pair_group;        // pairing hint — shown when disconnected
 static lv_obj_t *pair_title;        // title label — "Waiting for host" vs "Pairing…"
+static lv_obj_t *pair_l2;           // how-to line 1 ("hold the BOOT button")
+static lv_obj_t *pair_l3;           // how-to line 2 ("for 3 seconds, then release")
+static pair_hint_t s_pair_hint = PAIR_HINT_IDLE;  // driven by the hold-to-pair gesture
 static lv_obj_t *bar_session;
 static lv_obj_t *lbl_session_pct;
 static lv_obj_t *lbl_session_label;
@@ -486,17 +489,17 @@ static void build_pair_group(lv_obj_t *parent)
     lv_obj_set_style_text_color(pair_title, COL_TEXT, 0);
     lv_obj_align(pair_title, LV_ALIGN_TOP_MID, 0, 40);
 
-    lv_obj_t *l2 = lv_label_create(pair_group);
-    lv_label_set_text(l2, "hold the power button");
-    lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l2, COL_DIM, 0);
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 120);
+    pair_l2 = lv_label_create(pair_group);
+    lv_label_set_text(pair_l2, "hold the BOOT button");
+    lv_obj_set_style_text_font(pair_l2, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(pair_l2, COL_DIM, 0);
+    lv_obj_align(pair_l2, LV_ALIGN_TOP_MID, 0, 120);
 
-    lv_obj_t *l3 = lv_label_create(pair_group);
-    lv_label_set_text(l3, "for 3 seconds, then release");
-    lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
-    lv_obj_set_style_text_color(l3, COL_DIM, 0);
-    lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, 160);
+    pair_l3 = lv_label_create(pair_group);
+    lv_label_set_text(pair_l3, "for 3 seconds, then release");
+    lv_obj_set_style_text_font(pair_l3, L.bt_device_font, 0);
+    lv_obj_set_style_text_color(pair_l3, COL_DIM, 0);
+    lv_obj_align(pair_l3, LV_ALIGN_TOP_MID, 0, 160);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN); // ui_update_ble_status decides
 }
@@ -842,9 +845,9 @@ static void init_settings_screen(lv_obj_t *scr)
 }
 
 // Re-sync the sliders + value labels to the live values. Called on screen entry
-// AND every loop while Settings is showing (from ui_tick_anim) so changes made
-// via the physical buttons (brightness_cycle / volume_cycle) appear live. The
-// per-field change guard means we only touch LVGL when a value actually moved,
+// AND every loop while Settings is showing (from ui_tick_anim) so any
+// out-of-band value change (e.g. a confirmation chime resetting volume) appears
+// live. The per-field change guard means we only touch LVGL when a value moved,
 // so the per-loop call costs nothing and doesn't fight an in-progress drag
 // (a drag updates the underlying value to match the slider, so nothing changes).
 static void settings_refresh(void)
@@ -1219,6 +1222,53 @@ void ui_update(const UsageData *data)
     lv_label_set_text(lbl_weekly_reset, buf);
 }
 
+// Render the disconnected-screen pairing hint from the gesture state + bond
+// presence. The how-to lines only make sense in the IDLE state, so they hide
+// while the gesture is armed or the soft pairing window is open.
+static void apply_pair_hint(void)
+{
+    if (!pair_title)
+        return;
+    const char *title;
+    bool show_howto = false;
+    switch (s_pair_hint)
+    {
+    case PAIR_HINT_ARMED:
+        title = "Release to pair";
+        break;
+    case PAIR_HINT_OPEN:
+        title = "Pairing open\xE2\x80\xA6"; // soft 120s window; radio stays connectable
+        break;
+    default: // PAIR_HINT_IDLE — bonds present => a host paired before, just not
+             // connected (e.g. laptop asleep); none => fresh/cleared, waiting.
+        title = ble_has_bonds() ? "Waiting for host" : "Pairing\xE2\x80\xA6";
+        show_howto = true;
+        break;
+    }
+    lv_label_set_text(pair_title, title);
+    if (pair_l2 && pair_l3)
+    {
+        if (show_howto)
+        {
+            lv_obj_clear_flag(pair_l2, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(pair_l3, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(pair_l2, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(pair_l3, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void ui_set_pair_hint(pair_hint_t h)
+{
+    if (s_pair_hint == h)
+        return;
+    s_pair_hint = h;
+    apply_pair_hint();
+}
+
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
@@ -1245,19 +1295,19 @@ static void update_view_state(void)
     {
         v = 1; // idle / Zzz
     }
-    // Refresh the pairing title whenever bond state flips, even with no view
-    // change — the 3s-hold can clear bonds while already on the pair screen.
-    // Bonds present => a host paired before, just not connected (e.g. laptop
-    // asleep). No bonds => fresh/cleared, waiting for first pairing.
+    // Refresh the pairing hint whenever the gesture state or bond state flips,
+    // even with no view change — the hold-to-pair gesture mutates both while
+    // already on the pair screen.
     if (v == 0 && pair_title)
     {
         static int last_bonds = -1;
+        static pair_hint_t last_hint = (pair_hint_t)-1;
         int bonds = ble_has_bonds() ? 1 : 0;
-        if (bonds != last_bonds)
+        if (bonds != last_bonds || s_pair_hint != last_hint)
         {
             last_bonds = bonds;
-            lv_label_set_text(pair_title,
-                              bonds ? "Waiting for host" : "Pairing\xE2\x80\xA6");
+            last_hint = s_pair_hint;
+            apply_pair_hint();
         }
     }
     if (v == view_state)
@@ -1361,12 +1411,10 @@ static const char *corner_loop_anim(void)
     uint32_t now = lv_tick_get();
     if (!s_ble_connected || view_state == 1)
         return "expression sleep"; // no host connection / stale data — sleeping
-    if (s_claude_state == CLAUDE_QUESTION)
-        return "idle look around"; // blocked on a user question
-    if (s_claude_state == CLAUDE_WAITING)
-        return "expression surprise"; // tool-permission prompt pending
+    if (s_claude_state == CLAUDE_QUESTION || s_claude_state == CLAUDE_WAITING)
+        return "work think"; // blocked on a user question / tool-permission prompt
     if (s_claude_state == CLAUDE_WORKING)
-        return "work think";
+        return "work coding";
     if (s_claude_state == CLAUDE_IDLE && (now - s_idle_since_ms) < IDLE_FINISHED_MS)
         return "dance bounce"; // a turn just finished — celebrate briefly
     return NULL; // CLAUDE_IDLE (settled) / CLAUDE_NONE — hand off to living idle

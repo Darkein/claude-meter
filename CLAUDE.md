@@ -23,7 +23,7 @@ Connects to a host daemon over BLE; daemon polls Anthropic API for usage data. T
 - Touch: **CST9220** via I2C (SDA=15, SCL=14, INT=11, addr=0x5A)
 - PMU: **AXP2101** on same I2C bus (addr=0x34) — battery, USB VBUS, PWR button IRQ
 - IMU: **QMI8658** on same I2C bus (addr=0x6B) — accelerometer for auto-rotation
-- Buttons: GPIO 0 (left → Space/voice-mode), GPIO 18 (right → Shift+Tab/mode-toggle), AXP PKEY (middle → cycle screens; on splash → cycle animations)
+- Buttons: GPIO 0 (BOOT → primary, **hold ~3s + release = pairing**), GPIO 18 (right → secondary, cycles to the next screen), AXP PKEY (PWR → short-press toggles screen sleep/wake; **hold ~4s = power off**, **short-press when off = power on**). Brightness + volume are set in Settings, not on a button.
 
 ### AMOLED-2.16 (C6 - default board)
 Same 480×480 CO5300 panel as the S3 2.16, but a **different SoC and GPIO map**. SoC: **ESP32-C6** — single-core RISC-V @160MHz, Wi-Fi 6 (2.4GHz), **BLE 5.3 only (no classic BT)**, **no PSRAM**, 16MB NOR flash. Onboard chip antenna; IPEX1 external-antenna option via resoldering one resistor. Pins verified against the official Waveshare XiaoZhi BSP.
@@ -34,7 +34,7 @@ Same 480×480 CO5300 panel as the S3 2.16, but a **different SoC and GPIO map**.
 - RTC: **PCF85063** @ 0x51 on the shared I2C bus — keeps wall-clock time offline (`BOARD_HAS_RTC`).
 - Audio: **ES8311** codec @ 0x18 (I2C control on the shared bus; I2S MCLK=19, BCLK/SCLK=20, LRCK=22, DOUT/DSDIN=23, DIN/ASDOUT=21) → speaker amp (PA_CTRL = AXP ALDO2) → 2-pin speaker pads. Firmware plays synthesized chimes **DAC-only @16kHz/16-bit/mono**; codec init is hand-rolled (no vendored codec lib, same stance as touch). **ES7210** ADC + dual-mic array (echo-cancel/voice, shares the I2S bus on 21/22/23) and the **micro-SD slot** (SCK=0/MOSI=1/MISO=2 shared with the QSPI display pins, CS=GPIO6; FAT32) are populated on the board but **unused by firmware**.
 - Orientation: **IMU auto-rotation** (0/90/180/270 via CPU strip remap in `display_hal_draw_bitmap`). Touch arrives in raw panel coords, so `touch.cpp` un-rotates it back into LVGL's logical frame by the same quadrant (inverse of `rotate_strip`) — without this, all touch (sliders, top-left Settings tap) is misaligned when rotated. Even-aligned flush regions required (CO5300) — `display_hal_round_area`.
-- Buttons: **GPIO 9** (BOOT → primary, cycles brightness; **hold while powering on = serial download mode**), **GPIO 10** (KEY → secondary, cycles chime volume), AXP PWRKEY (PWR → cycle screens; hold ~3s + release = pairing; long-press = power off, short-press = power on). All three confirmed on the official GPIO schema. `BOARD_HAS_SECONDARY_BUTTON` = 1, no third GPIO button.
+- Buttons: **GPIO 9** (BOOT → primary, **hold ~3s + release = pairing**; **hold while powering on = serial download mode**), **GPIO 10** (KEY → secondary, cycles to the next screen), AXP PWRKEY (PWR → short-press toggles screen sleep/wake; **hold ~4s = power off**, **short-press when off = power on**). Brightness + volume are now set in Settings, not on a button. All three confirmed on the official GPIO schema. `BOARD_HAS_SECONDARY_BUTTON` = 1, no third GPIO button. Power on/off timing lives in `power.cpp` (`setPowerKeyPressOffTime`/`setPowerKeyPressOnTime`); pairing/screen-cycle button dispatch is board-agnostic in `main.cpp` (`pair_tick`).
 
 ### AMOLED-1.8 (newer port)
 **Two hardware revisions ship under this name; the firmware probes I2C at boot and picks drivers automatically (`board_rev()`):**
@@ -44,7 +44,7 @@ Same 480×480 CO5300 panel as the S3 2.16, but a **different SoC and GPIO map**.
 - IMU: QMI8658 @ 0x6B (same chip — initialized for I2C bus health, rotation logic disabled)
 - IO expander: **XCA9554 / PCA9554** @ I2C 0x20. Gates LCD_RST, TP_RST, audio amp enable, and reads the PWR button. **`io_expander_init()` MUST run before `gfx->begin()` or `ft3168_init()`** — otherwise display/touch stay in reset and silently fail. PWR button is on EXIO4, active HIGH (verified empirically with the deleted `iox` serial debug command).
 - Orientation: **fixed at 0°**. IMU auto-rotation is disabled; `rotate_strip()` / `handle_rotation_change()` are excluded via `#ifndef BOARD_AMOLED_18`.
-- Buttons: GPIO 0 (BOOT → Space/voice-mode), XCA9554 EXIO4 (PWR → cycle screens; on splash → cycle animations). **No third button** (GPIO 18 button doesn't exist on this board).
+- Buttons: GPIO 0 (BOOT → primary, **hold ~3s + release = pairing**), XCA9554 EXIO4 (PWR → short-press toggles screen sleep/wake). **No secondary/third button** (so no screen-cycle button — swipe to navigate); EXIO4 is a plain IO-expander read, not an AXP PKEY, so no hardware power off/on hold here.
 
 ## Architecture
 

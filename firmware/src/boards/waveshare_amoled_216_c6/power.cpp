@@ -42,10 +42,13 @@ void power_hal_init(void) {
                 | XPOWERS_AXP2101_PKEY_LONG_IRQ
                 | XPOWERS_AXP2101_PKEY_POSITIVE_IRQ);
 
-    // Default press-off is 6s, only 2s after the pair gesture arms at ~3s and
-    // disarms at ~6s. Bump to 8s so a slightly-too-long hold doesn't shut the
-    // device down mid-gesture.
-    pmu.setPowerKeyPressOffTime(XPOWERS_POWEROFF_8S);
+    // Pairing now lives on the BOOT button, so the PWR hold no longer competes
+    // with a pair gesture — shorten the force-shutdown to the 4s minimum for a
+    // quicker power-off. Power-on long-press shortened to 512ms so the device
+    // boots without a long hold (the AXP retains this register across the off
+    // state as long as it stays powered from battery/VBUS).
+    pmu.setPowerKeyPressOffTime(XPOWERS_POWEROFF_4S);
+    pmu.setPowerKeyPressOnTime(XPOWERS_POWERON_512MS);
 
     cached_charging = pmu.isCharging();
     cached_vbus     = pmu.isVbusIn();

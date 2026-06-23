@@ -27,7 +27,7 @@ polls the Anthropic API for usage and feeds Claude Code's session state to the d
 - **Settings screen** — tap the logo to open sliders for brightness, chime volume (audio boards),
   and the auto-sleep delay. The firmware version is shown at the bottom.
 - **Audio chimes** — boards with a speaker (the C6) play a chime when Claude needs you and when it
-  finishes; volume is adjustable from settings or the secondary button.
+  finishes; volume is adjustable from the Settings screen.
 - **Light-sleep power saving** — the panel fades out after a configurable idle delay and the CPU
   drops to a low-power loop; touch, a button, Claude activity, or USB power wakes it. It never
   sleeps while on USB power.
@@ -77,8 +77,8 @@ drops back when the prompt is resolved.
 | Brightness / volume / sleep sliders (tap the logo) | Mirrors a Claude Code permission prompt |
 
 When the device has no fresh data it shows an idle sleeping-Clawd animation; while disconnected
-it shows a pairing hint (**hold the power button for 3 seconds, then release, to enter pairing
-mode** — this clears the saved Bluetooth bond and re-advertises).
+it shows a pairing hint (**hold the BOOT button for 3 seconds, then release, to enter pairing
+mode** — this clears the saved Bluetooth bond and re-advertises for a ~2-minute open window).
 
 ## Hardware
 
@@ -252,13 +252,15 @@ for the wire protocol.
 
 The physical buttons control the device locally (this fork does **not** act as a BLE HID keyboard).
 
-| Button              | 2.16″ S3                                         | 2.16″ C6           | 1.8″ S3              |
-| ------------------- | ------------------------------------------------ | ------------------ | -------------------- |
-| **Primary** (BOOT)  | Cycle brightness                                 | Cycle brightness   | Cycle brightness     |
-| **Secondary** (KEY) | Cycle volume\*                                   | Cycle chime volume | — (no second button) |
-| **Power** (PWR)     | Tap: screen on/off · Hold 3 s + release: pairing | same               | same                 |
+| Button              | 2.16″ S3                                                          | 2.16″ C6 | 1.8″ S3                  |
+| ------------------- | ----------------------------------------------------------------- | -------- | ------------------------ |
+| **Primary** (BOOT)  | Hold 3 s + release: pairing                                       | same     | same                     |
+| **Secondary** (KEY) | Cycle to the next screen                                          | same     | — (no second button)     |
+| **Power** (PWR)     | Tap: screen on/off · Hold ~4 s: power off · Tap when off: power on | same     | Tap: screen on/off\*     |
 
-\* The 2.16″ S3 has no speaker, so its secondary button cycles a volume that has no audible effect.
+\* The 1.8″ board's power button is an IO-expander input, not an AXP power key, so it only toggles
+the screen — there is no hardware power off/on hold. Brightness and chime volume are set on the
+**Settings** screen (tap the logo), not on a physical button.
 
 ## BLE protocol
 

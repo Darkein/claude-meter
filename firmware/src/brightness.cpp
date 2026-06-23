@@ -9,11 +9,6 @@
 // scheme is abandoned (first boot just falls back to the default).
 static uint8_t cur_val = DISPLAY_DEFAULT_BRIGHTNESS;
 
-// Coarse steps the physical button cycles through. The slider is fully
-// granular; the button just hops between these familiar levels.
-static const uint8_t PRESETS[] = {64, 128, 200, 255};
-#define PRESETS_COUNT (sizeof(PRESETS) / sizeof(PRESETS[0]))
-
 static uint8_t clamp_val(uint8_t v) {
     if (v < BRIGHTNESS_MIN) return BRIGHTNESS_MIN;
     return v;
@@ -43,16 +38,6 @@ void brightness_set(uint8_t val) {
     prefs.putUShort("brt_val", cur_val);
     prefs.end();
     Serial.printf("Brightness set: val=%u\n", cur_val);
-}
-
-void brightness_cycle(void) {
-    // Hop to the first preset strictly above the current value, wrapping to the
-    // lowest. Keeps the button's "tap to step up, wrap around" feel.
-    uint8_t next = PRESETS[0];
-    for (uint8_t i = 0; i < PRESETS_COUNT; i++) {
-        if (PRESETS[i] > cur_val) { next = PRESETS[i]; break; }
-    }
-    brightness_set(next);
 }
 
 uint8_t brightness_get(void) {
