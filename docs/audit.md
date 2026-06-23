@@ -83,8 +83,12 @@ items are fixed, strike them through and link the commit/PR.
     (observe-only: exit 0 would AUTO-ALLOW, exit 2 would block — human stays sole approver). Extracts a
     human detail (command/path/url/pattern/first scalar, truncated 60). Skips AskUserQuestion (lets
     `asking` stand).
-  - `state-pretool.sh` — **PreToolUse** (after a prompt is granted, before the tool runs) → `working`,
-    clearing the device approval screen at decision time, not at slow PostToolUse. Skips AskUserQuestion.
+  - `state-pretool.sh` — **PreToolUse** (fires *before* the permission dialog — it's the hook that can
+    emit the allow/ask decision, so it precedes PermissionRequest) → `working`, clearing any *stale*
+    dialog. For a permission-gated tool the following PermissionRequest re-sets `waiting`, so the live
+    approval screen is **only cleared by PostToolUse at command completion** — no Claude Code hook fires
+    at grant/start, so the screen necessarily lingers for the whole tool run (a 30s Bash shows 30s).
+    Skips AskUserQuestion.
   - `state-end.sh` — **SessionEnd** → `rm` the session file.
 - **Daemon derivation** ([`_claude_state_fields`](../daemon/claude_usage_daemon.py)): disk is the **sole
   source of truth**, re-derived every read → restart-safe queue. Output `cs` (0 idle / 1 working / 2
