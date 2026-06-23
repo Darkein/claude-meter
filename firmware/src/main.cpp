@@ -146,6 +146,17 @@ static bool parse_json(const char* json, UsageData* out) {
         strlcpy(a.session, item["sn"] | "", sizeof(a.session));
     }
 
+    // Bounded per-session list for the dashboard. Each entry: {n: name, cs: state}.
+    out->session_n = 0;
+    JsonArrayConst ss = doc["ss"].as<JsonArrayConst>();
+    for (JsonObjectConst item : ss) {
+        if (out->session_n >= MAX_SESSIONS)
+            break;
+        SessionRow &r = out->sessions[out->session_n++];
+        strlcpy(r.name, item["n"] | "", sizeof(r.name));
+        r.state = (claude_state_t)(int)(item["cs"] | 0);
+    }
+
     out->valid = true;
     return true;
 }

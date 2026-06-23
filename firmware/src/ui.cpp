@@ -66,6 +66,11 @@ struct Layout
     int16_t set_slider_dy;  // slider offset below its row's name/value labels
     int16_t set_slider_h;   // slider track height (touch target)
     const lv_font_t *set_label_font;
+
+    // Sessions screen (multi-session dashboard)
+    int16_t sess_row_gap;   // vertical distance between consecutive session rows
+    int16_t sess_dot;       // state-dot diameter
+    const lv_font_t *sess_name_font;
 };
 static Layout L = {};
 
@@ -100,6 +105,9 @@ static void compute_layout(const BoardCaps &c)
         L.set_slider_dy = 46;
         L.set_slider_h = 26;
         L.set_label_font = &font_styrene_28;
+        L.sess_row_gap = 56;
+        L.sess_dot = 18;
+        L.sess_name_font = &font_styrene_28;
     }
     else
     {
@@ -121,6 +129,9 @@ static void compute_layout(const BoardCaps &c)
         L.set_slider_dy = 38;
         L.set_slider_h = 22;
         L.set_label_font = &font_styrene_20;
+        L.sess_row_gap = 48;
+        L.sess_dot = 16;
+        L.sess_name_font = &font_styrene_20;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -208,14 +219,29 @@ static lv_obj_t *lbl_approval_session; // project folder of the blocked session
 static lv_obj_t *lbl_approval_tool;    // tool name, e.g. "Bash"
 static lv_obj_t *lbl_approval_detail;  // command / path / url
 
+// ---- Sessions screen (multi-session dashboard, one row per live Claude session) ----
+static lv_obj_t *sessions_container;
+static lv_obj_t *lbl_sessions_title;             // "Sessions" + count
+static lv_obj_t *lbl_sessions_empty;             // "No active sessions" (shown when none)
+static lv_obj_t *session_dot[MAX_SESSIONS];      // per-row state dot
+static lv_obj_t *session_name[MAX_SESSIONS];     // per-row project-name label
+
 // ---- Cached live Claude Code state (from ui_update) ----
 static claude_state_t s_claude_state = CLAUDE_IDLE;
 static int s_approval_count = 0;                 // aq — true total (may exceed s_approval_n)
 static Approval s_approvals[MAX_APPROVALS];      // q — bounded detail list
 static uint8_t s_approval_n = 0;                 // entries filled in s_approvals
 static uint8_t s_approval_view_idx = 0;          // which approval the screen shows
+static SessionRow s_sessions[MAX_SESSIONS];      // ss — cached per-session dashboard list
+static uint8_t s_session_n = 0;                  // entries filled in s_sessions
 static uint32_t s_idle_since_ms = 0; // when CLAUDE_IDLE was entered ("Finished!" 10s window)
 #define IDLE_FINISHED_MS 10000
+
+// ---- Creature mood (event-driven one-shot reactions for the corner creature) ----
+static uint32_t s_working_since_ms = 0;     // when CLAUDE_WORKING was entered (long-task timer)
+static float    s_prev_session_pct = -1.0f; // previous session_pct (reset / near-limit edges)
+static const char *s_corner_oneshot = NULL; // pending one-shot anim name, consumed in ui_tick_anim
+#define LONG_TASK_MS 60000                   // a task this long earns the big "dance djmix" celebration
 
 // ---- Cached API-error state (from ui_update, daemon's ok/em fields) ----
 static bool s_error_active = false;       // daemon reported a catchable API error
@@ -1142,6 +1168,109 @@ static void approval_refresh_labels(void)
                           is_plan ? "Plan" : is_question ? "Question" : "Permission");
 }
 
+// Color for a session's state dot, chosen so all four states are visually
+// distinct (the brand ACCENT and AMBER tokens are the same terracotta, so
+// working uses GREEN): working = green (active), permission-waiting = terracotta
+// (attention), question = red (blocked on you), idle = dim grey.
+static lv_color_t session_state_color(claude_state_t st)
+{
+    switch (st)
+    {
+    case CLAUDE_WORKING:  return COL_GREEN;
+    case CLAUDE_WAITING:  return COL_AMBER;
+    case CLAUDE_QUESTION: return COL_RED;
+    default:              return COL_DIM; // IDLE / NONE
+    }
+}
+
+// Multi-session dashboard: a header + one row (state dot + project name) per live
+// Claude session. Rows are pre-created and shown/hidden by sessions_refresh().
+static void init_sessions_screen(lv_obj_t *scr)
+{
+    sessions_container = lv_obj_create(scr);
+    lv_obj_set_size(sessions_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(sessions_container, 0, 0);
+    lv_obj_set_style_bg_opa(sessions_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sessions_container, 0, 0);
+    lv_obj_set_style_pad_all(sessions_container, 0, 0);
+    lv_obj_clear_flag(sessions_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(sessions_container, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // Header, centered against the top-bar icons like the approval screen.
+    lbl_sessions_title = lv_label_create(sessions_container);
+    lv_label_set_text(lbl_sessions_title, "Sessions");
+    lv_obj_set_style_text_font(lbl_sessions_title, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_sessions_title, COL_DIM, 0);
+    lv_obj_align(lbl_sessions_title, LV_ALIGN_TOP_MID, 0, L.title_y + 12);
+
+    // Empty-state line, centered (shown when no sessions are live).
+    lbl_sessions_empty = lv_label_create(sessions_container);
+    lv_label_set_text(lbl_sessions_empty, "No active sessions");
+    lv_obj_set_style_text_font(lbl_sessions_empty, L.set_label_font, 0);
+    lv_obj_set_style_text_color(lbl_sessions_empty, COL_DIM, 0);
+    lv_obj_align(lbl_sessions_empty, LV_ALIGN_CENTER, 0, 0);
+
+    const int16_t lh = lv_font_get_line_height(L.sess_name_font);
+    const int16_t name_x = L.margin + L.sess_dot + 14;
+    for (uint8_t i = 0; i < MAX_SESSIONS; i++)
+    {
+        const int16_t row_y = L.content_y + i * L.sess_row_gap;
+
+        session_dot[i] = lv_obj_create(sessions_container);
+        lv_obj_set_size(session_dot[i], L.sess_dot, L.sess_dot);
+        lv_obj_set_style_radius(session_dot[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(session_dot[i], 0, 0);
+        lv_obj_set_style_pad_all(session_dot[i], 0, 0);
+        lv_obj_clear_flag(session_dot[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(session_dot[i], LV_ALIGN_TOP_LEFT, L.margin, row_y + (lh - L.sess_dot) / 2);
+
+        session_name[i] = lv_label_create(sessions_container);
+        lv_label_set_text(session_name[i], "");
+        lv_obj_set_style_text_font(session_name[i], L.sess_name_font, 0);
+        lv_obj_set_style_text_color(session_name[i], COL_TEXT, 0);
+        lv_label_set_long_mode(session_name[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(session_name[i], L.content_w - L.sess_dot - 14);
+        lv_obj_align(session_name[i], LV_ALIGN_TOP_LEFT, name_x, row_y);
+    }
+
+    lv_obj_add_flag(sessions_container, LV_OBJ_FLAG_HIDDEN); // ui_show_screen decides
+}
+
+// Paint the dashboard rows from the cached session list. Cheap and idempotent —
+// safe to call every update even while the screen is hidden.
+static void sessions_refresh(void)
+{
+    if (!sessions_container)
+        return;
+
+    if (s_session_n == 0)
+        lv_label_set_text(lbl_sessions_title, "Sessions");
+    else
+        lv_label_set_text_fmt(lbl_sessions_title, "Sessions  %d", s_session_n);
+
+    if (s_session_n == 0)
+        lv_obj_clear_flag(lbl_sessions_empty, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(lbl_sessions_empty, LV_OBJ_FLAG_HIDDEN);
+
+    for (uint8_t i = 0; i < MAX_SESSIONS; i++)
+    {
+        if (i < s_session_n)
+        {
+            lv_obj_set_style_bg_color(session_dot[i], session_state_color(s_sessions[i].state), 0);
+            lv_label_set_text(session_name[i],
+                              s_sessions[i].name[0] ? s_sessions[i].name : "(session)");
+            lv_obj_clear_flag(session_dot[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(session_name[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(session_dot[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(session_name[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 // ======== Public API ========
 
 // Screen-level swipe handler. LVGL emits LV_EVENT_GESTURE on the active screen
@@ -1236,6 +1365,7 @@ void ui_init(void)
     init_clock_screen(scr);
     init_settings_screen(scr);
     init_approval_screen(scr);
+    init_sessions_screen(scr);
 
     // Top-left header creature: replaces the old static logo. Its animation is
     // driven by Claude's live state in ui_tick_anim() (see corner_anim_for_state).
@@ -1315,6 +1445,14 @@ void ui_update(const UsageData *data)
         else if (data->claude_state == CLAUDE_IDLE && s_claude_state == CLAUDE_WORKING)
             audio_hal_play(SND_DONE);
 
+        // Creature mood: stamp the WORKING-entry time, and fire the big celebration
+        // one-shot when a long task finishes (kept rare so it stays special).
+        if (data->claude_state == CLAUDE_WORKING)
+            s_working_since_ms = lv_tick_get();
+        else if (data->claude_state == CLAUDE_IDLE && s_claude_state == CLAUDE_WORKING &&
+                 (lv_tick_get() - s_working_since_ms) >= LONG_TASK_MS)
+            s_corner_oneshot = "dance djmix";
+
         // Wake the panel on any Claude-state edge so the user sees what just
         // changed (turn finished, attention needed, work started).
         if (data->claude_state != CLAUDE_NONE)
@@ -1335,6 +1473,11 @@ void ui_update(const UsageData *data)
     for (uint8_t i = 0; i < s_approval_n; i++)
         s_approvals[i] = data->approvals[i];
     apply_claude_state();
+
+    s_session_n = data->session_n;
+    for (uint8_t i = 0; i < s_session_n; i++)
+        s_sessions[i] = data->sessions[i];
+    sessions_refresh();
 
     last_data_ms = lv_tick_get(); // a valid update just landed → dot goes green
     data_received = true;
@@ -1370,6 +1513,22 @@ void ui_update(const UsageData *data)
 
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
+
+    // Creature mood: react to usage edges. A sharp session_pct drop means a window
+    // reset (usage only climbs within a window), and crossing 80% upward is the
+    // near-limit heads-up. Both fire a single "surprise" one-shot; edge-guarded via
+    // s_prev_session_pct so the daemon's periodic re-sends don't re-trigger. (No
+    // stressed pose exists in the asset set — a one-shot surprise is the tasteful,
+    // honest cue; the usage bars remain the actual gauge.)
+    if (s_prev_session_pct >= 0.0f)
+    {
+        if (data->session_pct < s_prev_session_pct - 20.0f)
+            s_corner_oneshot = "expression surprise"; // window reset — fresh budget
+        else if (s_prev_session_pct < 80.0f && data->session_pct >= 80.0f &&
+                 strcmp(data->status, "allowed") == 0)
+            s_corner_oneshot = "expression surprise"; // crossed the near-limit line
+    }
+    s_prev_session_pct = data->session_pct;
 }
 
 // Render the disconnected-screen pairing hint from the gesture state + bond
@@ -1596,8 +1755,8 @@ static void corner_idle_tick(void)
     }
     else if (now >= s_corner_idle_next_ms)
     {
-        static const char *const idle_anims[] = {"idle breathe", "idle blink", "idle look around"};
-        splash_mini_play_once(corner_creature, idle_anims[esp_random() % 3]);
+        static const char *const idle_anims[] = {"idle breathe", "idle blink", "idle look around", "expression wink"};
+        splash_mini_play_once(corner_creature, idle_anims[esp_random() % 4]);
     }
 }
 
@@ -1612,7 +1771,20 @@ void ui_tick_anim(void)
     if (corner_creature)
     {
         const char *loop = corner_loop_anim();
-        if (loop)
+        // An event reaction (one-shot) preempts the loop for its duration; the
+        // normal loop / living-idle resumes once it finishes (splash holds the
+        // last frame until then).
+        if (s_corner_oneshot && !splash_mini_busy(corner_creature))
+        {
+            splash_mini_play_once(corner_creature, s_corner_oneshot);
+            s_corner_oneshot = NULL;
+            s_corner_idle = false;
+        }
+        if (splash_mini_busy(corner_creature))
+        {
+            splash_mini_tick(corner_creature); // let the one-shot run, don't preempt
+        }
+        else if (loop)
         {
             s_corner_idle = false;
             splash_mini_set_anim(corner_creature, loop);
@@ -1665,6 +1837,8 @@ void ui_show_screen(screen_t screen)
         lv_obj_add_flag(settings_container, LV_OBJ_FLAG_HIDDEN);
     if (approval_container)
         lv_obj_add_flag(approval_container, LV_OBJ_FLAG_HIDDEN);
+    if (sessions_container)
+        lv_obj_add_flag(sessions_container, LV_OBJ_FLAG_HIDDEN);
 
     switch (screen)
     {
@@ -1674,6 +1848,10 @@ void ui_show_screen(screen_t screen)
     case SCREEN_CLOCK:
         lv_obj_clear_flag(clock_container, LV_OBJ_FLAG_HIDDEN);
         clock_refresh(); // paint immediately so the swipe-in isn't blank
+        break;
+    case SCREEN_SESSIONS:
+        lv_obj_clear_flag(sessions_container, LV_OBJ_FLAG_HIDDEN);
+        sessions_refresh(); // paint immediately so the swipe-in isn't blank
         break;
     case SCREEN_SETTINGS:
         lv_obj_clear_flag(settings_container, LV_OBJ_FLAG_HIDDEN);
@@ -1743,14 +1921,16 @@ void ui_swipe(int dir)
         return;
     }
 
-    int total = 2 + s_approval_n;      // Usage, Clock, then each approval
+    int total = 3 + s_approval_n;      // Usage, Clock, Sessions, then each approval
     int cur;
     if (current_screen == SCREEN_USAGE)
         cur = 0;
     else if (current_screen == SCREEN_CLOCK)
         cur = 1;
+    else if (current_screen == SCREEN_SESSIONS)
+        cur = 2;
     else // SCREEN_APPROVAL
-        cur = 2 + (s_approval_n ? s_approval_view_idx : 0);
+        cur = 3 + (s_approval_n ? s_approval_view_idx : 0);
 
     int next = ((cur + dir) % total + total) % total;
 
@@ -1758,9 +1938,11 @@ void ui_swipe(int dir)
         ui_show_screen(SCREEN_USAGE);
     else if (next == 1)
         ui_show_screen(SCREEN_CLOCK);
+    else if (next == 2)
+        ui_show_screen(SCREEN_SESSIONS);
     else
     {
-        s_approval_view_idx = (uint8_t)(next - 2);
+        s_approval_view_idx = (uint8_t)(next - 3);
         approval_refresh_labels();
         ui_show_screen(SCREEN_APPROVAL);
     }
