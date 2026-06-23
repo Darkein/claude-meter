@@ -13,9 +13,11 @@
 #     and the human stays the sole approver.
 # So this script always `exit 1`. Do not change that to 0.
 #
-# Cleared by: PostToolUse (working) when the tool runs after a grant; an idle
-# signal (Stop / idle_prompt) on a deny/ESC (see state-set.sh); SessionEnd; or
-# the daemon's dialog TTL.
+# Cleared by: PostToolUse (working) — which fires when the tool COMPLETES, not at
+# grant/start (no Claude Code hook fires then), so a long-running granted tool
+# keeps the approval screen up for its full duration; an idle signal (Stop /
+# idle_prompt) on a deny/ESC (see state-set.sh); SessionEnd; or the daemon's
+# dialog TTL.
 set -u
 IN=$(cat)
 SID=$(printf '%s' "$IN" | jq -r '.session_id // empty')
