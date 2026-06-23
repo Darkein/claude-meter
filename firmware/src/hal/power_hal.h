@@ -15,13 +15,7 @@ int  power_hal_battery_pct(void);  // 0..100, or -1 if no battery (see BoardCaps
 bool power_hal_is_charging(void);
 bool power_hal_is_vbus_in(void);   // USB cable present (true even without a battery)
 
-// Edge-triggered: returns true once per PWR short-press, then clears.
+// Edge-triggered: returns true once per PWR short-press, then clears. Toggles
+// screen sleep/wake. (Pairing is a BOOT-button hold in main.cpp, not PWR, so
+// the PWR long-press / release edges are no longer part of the HAL.)
 bool power_hal_pwr_pressed(void);
-
-// Edge-triggered: true once when a PWR hold crosses the long-press threshold
-// (~1.5s), then clears. Starts the hold-to-pair gesture.
-bool power_hal_pwr_long_pressed(void);
-
-// Edge-triggered: true once on the PWR release edge, then clears. Completes
-// or cancels the hold-to-pair gesture.
-bool power_hal_pwr_released(void);

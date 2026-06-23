@@ -8,12 +8,9 @@
 // PWR button comes from XCA9554 EXIO4 (active HIGH). The PMU still
 // provides battery monitoring; we just don't subscribe to its PKEY IRQ.
 //
-// The AXP2101 PKEY IRQs (short/long/release) aren't available here, so we
-// synthesize the same three edges in software from the polled EXIO4 level:
-//   short    — fired on release if the hold was shorter than PWR_LONG_MS
-//   long     — fired once when a hold crosses PWR_LONG_MS
-//   release  — fired on every falling edge
-// This keeps the hold-to-pair gesture logic in main.cpp board-agnostic.
+// Only a short-press edge is needed (toggle screen sleep/wake) — pairing moved
+// to the BOOT button. We derive it from the polled EXIO4 level: a release that
+// came before PWR_LONG_MS is a short press; a longer hold is ignored.
 
 #define BATTERY_POLL_MS  2000
 #define CHARGING_POLL_MS 500
@@ -26,11 +23,9 @@ static int      cached_pct        = -1;
 static bool     cached_charging   = false;
 static bool     cached_vbus       = false;
 static bool     pwr_pressed_flag  = false;
-static bool     pwr_long_flag     = false;
-static bool     pwr_released_flag = false;
 static bool     last_pwr_state    = false;   // edge detector for EXIO4
 static uint32_t pwr_press_started_ms = 0;
-static bool     pwr_long_fired    = false;   // long already fired for this hold
+static bool     pwr_long_fired    = false;   // hold passed PWR_LONG_MS — suppress short
 static uint32_t last_battery_ms   = 0;
 static uint32_t last_charging_ms  = 0;
 static uint32_t last_pwr_ms       = 0;
@@ -70,12 +65,9 @@ void power_hal_tick(void) {
             pwr_press_started_ms = now;
             pwr_long_fired = false;
         } else if (pwr_now && last_pwr_state) {      // held
-            if (!pwr_long_fired && (now - pwr_press_started_ms >= PWR_LONG_MS)) {
-                pwr_long_flag  = true;
-                pwr_long_fired = true;
-            }
+            if (!pwr_long_fired && (now - pwr_press_started_ms >= PWR_LONG_MS))
+                pwr_long_fired = true;               // long hold — suppress short press
         } else if (!pwr_now && last_pwr_state) {     // falling edge — release
-            pwr_released_flag = true;
             if (!pwr_long_fired) pwr_pressed_flag = true;  // short press
         }
         last_pwr_state = pwr_now;
@@ -88,15 +80,5 @@ bool power_hal_is_vbus_in(void)  { return cached_vbus; }
 
 bool power_hal_pwr_pressed(void) {
     if (pwr_pressed_flag) { pwr_pressed_flag = false; return true; }
-    return false;
-}
-
-bool power_hal_pwr_long_pressed(void) {
-    if (pwr_long_flag) { pwr_long_flag = false; return true; }
-    return false;
-}
-
-bool power_hal_pwr_released(void) {
-    if (pwr_released_flag) { pwr_released_flag = false; return true; }
     return false;
 }
