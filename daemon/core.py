@@ -238,6 +238,7 @@ async def poll_api(token: str) -> dict:
 _waiting_seen: dict[str, tuple[float, int]] = {}
 WAITING_STABLE_READS = 2
 MAX_Q = 4
+MAX_SESSIONS = 6   # max rows in the multi-session dashboard list (ss)
 
 
 # Map an "asking" dialog kind to the tool name the firmware keys its wording on
@@ -270,6 +271,10 @@ def _claude_state_fields() -> dict:
     asking_name = ""                 # project folder of that "asking" session
     waiting: list[tuple[float, str, str, str, str]] = []
     live_waiting_sids: set[str] = set()
+    # Per-session records for the dashboard list (ss). One per fresh session;
+    # the per-session state is resolved after the loop (reusing the gated
+    # waiting set so a transient auto-grant doesn't flash a session as waiting).
+    session_recs: list[tuple[str, str, str, bool, str | None, bool, float]] = []
 
     try:
         files = list(STATE_DIR.glob("*.json"))
@@ -294,6 +299,12 @@ def _claude_state_fields() -> dict:
             # or a pre-upgrade single-field file). Drop it so the dir stays clean.
             f.unlink(missing_ok=True)
             continue
+
+        # Record this live session for the dashboard list (state resolved below).
+        rec_ts = max(dialog_ts if dialog_fresh else 0.0,
+                     act_ts if activity_fresh else 0.0)
+        session_recs.append((sid, str(d.get("name", ""))[:20], dialog, dialog_fresh,
+                             act, activity_fresh, rec_ts))
 
         # --- dialog (waiting/asking) takes priority over activity ---
         if dialog == "waiting" and now - dialog_ts <= DIALOG_STALE_S:
@@ -340,6 +351,26 @@ def _claude_state_fields() -> dict:
     activity = 1 if any_working else (0 if any_idle else 3)
 
     waiting.sort(key=lambda x: x[0])
+
+    # Build the dashboard list (ss): resolve each session's state, then sort
+    # attention-first (waiting/question before working before idle) so the
+    # 512 B drop ladder trims the least-interesting rows last.
+    gated_waiting = {w[1] for w in waiting}
+    _RANK = {2: 0, 4: 1, 1: 2}  # cs -> sort rank (idle/other default to 3, last)
+    sessions: list[tuple[int, float, str, int]] = []
+    for sid, name, dialog, dfresh, act, afresh, ts in session_recs:
+        if sid in gated_waiting:
+            cs = 2
+        elif dialog == "asking" and dfresh:
+            cs = 4
+        elif act == "working" and afresh:
+            cs = 1
+        else:
+            cs = 0
+        sessions.append((_RANK.get(cs, 3), ts, name, cs))
+    sessions.sort(key=lambda x: (x[0], -x[1]))
+    ss = [{"n": name, "cs": cs} for (_, _ts, name, cs) in sessions[:MAX_SESSIONS]]
+
     if waiting:
         q = [{"tn": tool, "td": detail, "sn": name}
              for (_, _sid, tool, detail, name) in waiting[:MAX_Q]]
@@ -347,13 +378,14 @@ def _claude_state_fields() -> dict:
             "cs": 2,
             "aq": len(waiting),
             "q": q,
+            "ss": ss,
             "_queue": [w[1] for w in waiting],
         }
     if asking_kind is not None:
         tn = _ASK_KIND_TO_TOOL.get(asking_kind, "AskUserQuestion")
         return {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": "", "sn": asking_name}],
-                "_queue": []}
-    return {"cs": activity, "aq": 0, "q": [], "_queue": []}
+                "ss": ss, "_queue": []}
+    return {"cs": activity, "aq": 0, "q": [], "ss": ss, "_queue": []}
 
 
 # ---------------------------------------------------------------------------
@@ -387,12 +419,17 @@ class Session:
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
         # The device RX buffer is 512 B and silently truncates a longer write
-        # (-> JSON parse fails). Session names ("sn") are a nice-to-have; drop
-        # them first so usage + state always get through under the worst-case
-        # full approval queue.
+        # (-> JSON parse fails). Drop ladder, cheapest loss first, so usage +
+        # aggregate state always get through: (1) approval-queue session names
+        # ("sn" — the dashboard "ss" already carries names), then (2) trim the
+        # dashboard list ("ss") from the tail (it is sorted attention-first, so
+        # the least-interesting idle rows go first).
         if len(data) > 500 and payload.get("q"):
             for entry in payload["q"]:
                 entry.pop("sn", None)
+            data = json.dumps(payload, separators=(",", ":")).encode()
+        while len(data) > 500 and payload.get("ss"):
+            payload["ss"].pop()
             data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:

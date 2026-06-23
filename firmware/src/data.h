@@ -21,6 +21,11 @@
 //             can swipe between each. sn = project folder name of the blocked
 //             session (dropped by the daemon if the payload would exceed the
 //             512 B RX buffer). aq may exceed the array length (badge "i / aq").
+//   ss array  per-session list (bounded):       -> sessions[] / session_n
+//             [{n:name, cs:state}, ...] one row per live Claude session, for the
+//             multi-session dashboard screen. Sorted attention-first by the daemon
+//             and truncated (after q[].sn) when the payload nears the 512 B buffer,
+//             so session_n may be < the true number of sessions.
 // (The daemon's internal `_queue` field is stripped before sending.)
 // `t` carries LOCAL wall time as an epoch (the device has no timezone); store
 // and display it verbatim.
@@ -47,6 +52,15 @@ struct Approval {
     char session[24];  // sn — project folder of the blocked session (may be empty)
 };
 
+// One live Claude Code session, for the multi-session dashboard. The daemon sends
+// up to MAX_SESSIONS rows (attention-first), bounded to keep the BLE JSON under the
+// 512-byte RX buffer.
+#define MAX_SESSIONS 6
+struct SessionRow {
+    char           name[24];  // n — project folder of the session (truncated by the daemon)
+    claude_state_t state;     // cs — this session's state (idle/working/waiting/question)
+};
+
 struct UsageData {
     float session_pct;       // 5-hour window utilization (0-100)
     int session_reset_mins;  // minutes until session resets
@@ -64,4 +78,8 @@ struct UsageData {
     int      approval_count;              // aq — true total pending (may exceed approval_n)
     Approval approvals[MAX_APPROVALS];    // q — bounded detail list, FIFO order
     uint8_t  approval_n;                  // number of entries actually filled in approvals[]
+
+    // Multi-session dashboard (set from the daemon's per-session hook files).
+    SessionRow sessions[MAX_SESSIONS];    // ss — bounded per-session list, attention-first
+    uint8_t    session_n;                 // number of entries actually filled in sessions[]
 };

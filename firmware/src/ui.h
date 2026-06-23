@@ -5,6 +5,7 @@
 enum screen_t {
     SCREEN_USAGE,
     SCREEN_CLOCK,      // wall-clock + date + battery; reached by swiping
+    SCREEN_SESSIONS,   // multi-session dashboard (one row per live Claude session); reached by swiping
     SCREEN_SETTINGS,   // brightness / volume / sleep-delay sliders; toggled by tapping the logo
     SCREEN_APPROVAL,   // mirrors Claude Code's tool-permission prompt (display-only)
     SCREEN_COUNT,
@@ -17,8 +18,8 @@ void ui_show_screen(screen_t screen);
 screen_t ui_get_current_screen(void);
 
 // Advance the on-screen carousel by `dir` (+1 = next, -1 = previous). The
-// virtual order is [Usage, Clock] followed by one slot per pending approval.
-// Wraps around. Called from the touch swipe gesture.
+// virtual order is [Usage, Clock, Sessions] followed by one slot per pending
+// approval. Wraps around. Called from the touch swipe gesture.
 void ui_swipe(int dir);
 
 // Pairing-hint state on the disconnected screen, driven by the BOOT hold-to-pair
