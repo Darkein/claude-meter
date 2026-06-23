@@ -35,6 +35,12 @@ INFO_CHAR_UUID = "4c41555a-4465-7669-6365-000000000006"  # board id + fw version
 
 POLL_INTERVAL = 60
 TICK = 5
+FAST_TICK = 0.4   # poll-loop re-check spacing while a dialog is still maturing
+                  # (young or not yet stability-confirmed). A permission prompt
+                  # fires ONE file write, so awatch wakes push() once; without a
+                  # fast re-check the stability gate's reads would be one slow
+                  # TICK apart and a prompt would surface ~5-10s late. Re-checking
+                  # fast collapses that to the DIALOG_MIN_AGE_S floor (~3s).
 SCAN_TIMEOUT = 8.0
 
 # Live Claude Code state: hooks write per-session files here; the daemon watches
@@ -270,6 +276,9 @@ def _claude_state_fields() -> dict:
     asking_name = ""                 # project folder of that "asking" session
     waiting: list[tuple[float, str, str, str, str]] = []
     live_waiting_sids: set[str] = set()
+    maturing = False      # a fresh waiting dialog exists but isn't confirmed yet
+                          # (too young, or awaiting its 2nd stable read) -> the
+                          # poll loop should re-check fast, not on the slow TICK.
 
     try:
         files = list(STATE_DIR.glob("*.json"))
@@ -306,6 +315,7 @@ def _claude_state_fields() -> dict:
                 prev_ts, seen = _waiting_seen.get(sid, (0.0, 0))
                 if dialog_ts != prev_ts:
                     _waiting_seen[sid] = (dialog_ts, 1)
+                    maturing = True   # first sighting; needs one more stable read
                 else:
                     seen += 1
                     _waiting_seen[sid] = (dialog_ts, seen)
@@ -314,6 +324,10 @@ def _claude_state_fields() -> dict:
                                         str(d.get("tool", ""))[:15],
                                         str(d.get("detail", ""))[:60],
                                         str(d.get("name", ""))[:20]))
+                    else:
+                        maturing = True
+            else:
+                maturing = True       # too young to count yet -> re-check soon
         elif dialog == "asking" and now - dialog_ts <= DIALOG_STALE_S:
             if dialog_ts > asking_ts:
                 asking_ts = dialog_ts
@@ -343,17 +357,23 @@ def _claude_state_fields() -> dict:
     if waiting:
         q = [{"tn": tool, "td": detail, "sn": name}
              for (_, _sid, tool, detail, name) in waiting[:MAX_Q]]
-        return {
+        result = {
             "cs": 2,
             "aq": len(waiting),
             "q": q,
             "_queue": [w[1] for w in waiting],
         }
-    if asking_kind is not None:
+    elif asking_kind is not None:
         tn = _ASK_KIND_TO_TOOL.get(asking_kind, "AskUserQuestion")
-        return {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": "", "sn": asking_name}],
-                "_queue": []}
-    return {"cs": activity, "aq": 0, "q": [], "_queue": []}
+        result = {"cs": 4, "aq": 1, "q": [{"tn": tn, "td": "", "sn": asking_name}],
+                  "_queue": []}
+    else:
+        result = {"cs": activity, "aq": 0, "q": [], "_queue": []}
+    # _maturing rides on whatever state fires (a young waiting dialog still shows
+    # as working/idle here) so the poll loop knows to re-check fast. Internal —
+    # stripped before the BLE send, like _queue.
+    result["_maturing"] = maturing
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +471,8 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
     last_error: dict = {}      # current error overlay (ok=False, ec, em) or {} when healthy
     last_pushed: str | None = None
     used = {"ok": False}
+    dialog_maturing = {"on": False}   # set by push(): a waiting dialog is still
+                                      # firming up -> poll_loop re-checks fast.
 
     # Pre-baked auth overlay — used for both a missing token and a 401/403.
     auth_error = _error_payload("auth", "Not logged in\nRun: claude login")
@@ -466,6 +488,7 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
         if not last_usage and not last_error:
             return
         state = _claude_state_fields()
+        dialog_maturing["on"] = bool(state.pop("_maturing", False))
         state.pop("_queue", None)
         # last_error wins over last_usage (its ok=False + em override the stale
         # numbers), so the device shows the error while keeping the bars beneath.
@@ -518,10 +541,15 @@ async def connect_and_run(backend, target, stop_event: asyncio.Event,
             # invisible until it went stale. Cheap: push() no-ops when the
             # serialized payload is unchanged.
             await push()
+            # While a permission/waiting dialog is maturing, re-check every
+            # FAST_TICK so it surfaces near the DIALOG_MIN_AGE_S floor instead of
+            # waiting up to two slow TICKs. The slow tick doubles as the BLE
+            # liveness probe; fast cycles skip the ping to spare the link.
+            wait = FAST_TICK if dialog_maturing["on"] else TICK
             try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
+                await asyncio.wait_for(session.refresh_requested.wait(), timeout=wait)
             except asyncio.TimeoutError:
-                if not await session.ping():
+                if wait >= TICK and not await session.ping():
                     session_stop.set()
                     break
 
